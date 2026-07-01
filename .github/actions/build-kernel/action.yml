@@ -42,92 +42,50 @@ runs:
     shell: bash
     run: |
       set -euo pipefail
-      echo "=== Menyuntikkan Modul Beatrice ==="
-      
       TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
       mkdir -p "$TARGET_DIR/drivers/beatrice"
-      
-      # Masuk langsung ke folder patches internal aksi ini
       cd "${{ github.action_path }}/patches/beatrice"
-      
-      # Salin menggunakan wildcard agar kebal perbedaan huruf besar/kecil
       cp beatrice_core.c "$TARGET_DIR/drivers/beatrice/beatrice_core.c"
       cp [Mm]akefile "$TARGET_DIR/drivers/beatrice/Makefile"
-
-      # Daftarkan ke Makefile utama drivers
       if ! grep -q "beatrice/" "$TARGET_DIR/drivers/Makefile"; then
         echo "obj-y += beatrice/" >> "$TARGET_DIR/drivers/Makefile"
       fi
-
-      echo "✅ Driver Beatrice berhasil disuntikkan dengan aman!"
 
   - name: 'Inject Tenebrion CPU/Cpuset Driver'
     shell: bash
     run: |
       set -euo pipefail
-      echo "=== Menyuntikkan Modul Tenebrion ==="
-      
       TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
       mkdir -p "$TARGET_DIR/drivers/tenebrion"
-      
-      # Masuk langsung ke folder patches internal aksi ini
       cd "${{ github.action_path }}/patches/tenebrion"
-      
       cp tenebrion.c "$TARGET_DIR/drivers/tenebrion/tenebrion.c"
       cp [Mm]akefile "$TARGET_DIR/drivers/tenebrion/Makefile"
-
       if ! grep -q "tenebrion/" "$TARGET_DIR/drivers/Makefile"; then
         echo "obj-y += tenebrion/" >> "$TARGET_DIR/drivers/Makefile"
       fi
-
-      echo "✅ Driver Tenebrion berhasil disuntikkan dengan aman!"
 
   - name: 'Inject Tenebrion SELinux Rules'
     shell: bash
     working-directory: ${{ github.workspace }}/kernel/common
     run: |
       set -euo pipefail
-      echo "=== Menyuntikkan Aturan SELinux Tenebrion ==="
-
-      # Ambil script selinux.sh dari folder patches
-      cd "${{ github.action_path }}/patches/tenebrion"
-      cp selinux.sh "$GITHUB_WORKSPACE/kernel/common/selinux.sh"
-      
-      # Kembali ke direktori kernel untuk mencari rules.c KSU
-      cd "$GITHUB_WORKSPACE/kernel/common"
+      SELINUX_PATCH_PATH="${{ github.action_path }}/patches/tenebrion/selinux.sh"
+      cp "$SELINUX_PATCH_PATH" ./selinux.sh
       chmod +x ./selinux.sh
-
-      # Cari rules.c secara mendalam di semua subdirektori KernelSU
-      RULES_FILE=$(find drivers/kernelsu -type f -name "rules.c" 2>/dev/null | head -1)
-
+      RULES_FILE=$(find -L drivers/kernelsu -type f -name "rules.c" 2>/dev/null | head -1)
       if [[ -z "$RULES_FILE" ]]; then
-        echo "❌ File rules.c tidak ditemukan di dalam struktur KernelSU!"
+        RULES_FILE=$(grep -rl "ksu_allow" . --include="rules.c" 2>/dev/null | head -1)
+      fi
+      if [[ -z "$RULES_FILE" ]]; then
         exit 1
       fi
-      
-      echo "✅ Ditemukan: $RULES_FILE"
-
-      if ! grep -qF 'rcu_assign_pointer(selinux_state.policy, pol);' "$RULES_FILE"; then
-        echo "❌ Marker line rcu_assign_pointer tidak ditemukan di $RULES_FILE"
-        exit 1
-      fi
-      
-      if ! grep -q "ksu_allow" "$RULES_FILE"; then
-        echo "❌ Fungsi ksu_allow tidak ditemukan di $RULES_FILE"
-        exit 1
-      fi
-
       export SELINUX_RULES_C="$RULES_FILE"
       ./selinux.sh
-
-      echo "✅ Tenebrion SELinux rules berhasil disuntikkan!"
-      grep -B2 -A35 "sysfs_leds" "$RULES_FILE" | head -40 || true
 
   - name: 'Build Kernel'
     shell: bash
     working-directory: ${{ github.workspace }}/kernel
     run: |
-      cat common/arch/arm64/configs/gki_defconfig
       sed -i 's/check_defconfig//' ./common/build.config.gki
       if [ -f "build/build.sh" ]; then
         BUILD_GKI_ARTIFACTS= \
@@ -167,26 +125,20 @@ runs:
         fi
       fi
 
-      cat /home/runner/out/common/.config || true
-
   - name: 'Gather Build Artifacts'
     shell: bash
     working-directory: ${{ github.workspace }}
     run: |
       set -euo pipefail
       if [ -f "/home/runner/out/dist/Image" ]; then
-        echo "Found Image at /home/runner/out/dist/Image"
         if [[ ${{ inputs.bypass }} == "true" ]]; then
           cp "/home/runner/out/dist/Image" "${{ github.workspace }}/AnyKernel3/Bypass-Image"
         else
           cp "/home/runner/out/dist/Image" "${{ github.workspace }}/AnyKernel3/Image"
-          echo "Kernel Version:"
-          strings "/home/runner/out/dist/Image" | grep -m1 "^Linux version "
         fi
-          exit 0
-        fi
+        exit 0
+      fi
       if [ -f "/home/runner/out/Image" ]; then
-        echo "Found Image at /home/runner/out/Image"
         if [[ ${{ inputs.bypass }} == "true" ]]; then
           cp "/home/runner/out/Image" "${{ github.workspace }}/AnyKernel3/Bypass-Image"
         else
@@ -194,7 +146,6 @@ runs:
         fi
         exit 0
       fi
-
       exit 1
 
   - name: 'Patch AnyKernel3 for Bypass Hack'
