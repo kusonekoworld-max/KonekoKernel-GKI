@@ -41,47 +41,140 @@ runs:
   - name: 'Debug - List Beatrice Patch Files'
     shell: bash
     run: |
-      echo "=== Isi folder beatrice ==="
-      ls -la "${{ github.action_path }}/patches/beatrice/" || echo "FOLDER TIDAK DITEMUKAN"
+      echo "=== Beatrice folder contents ==="
+      ls -la "${{ github.action_path }}/patches/beatrice/" || echo "FOLDER NOT FOUND"
 
   - name: 'Inject Beatrice Sysfs Driver'
     shell: bash
     working-directory: ${{ github.workspace }}/kernel/common
     run: |
       set -euo pipefail
-      
-      echo "=== Menyuntikkan Modul Beatrice ==="
+
+      echo "=== Injecting Beatrice module ==="
       mkdir -p drivers/beatrice
-      
-      # Bersihkan path dari karakter './' yang bikin glitch
+
+      # Clean up the './' segments in the action path that cause glitches
       RAW_PATH="${{ github.action_path }}"
       CLEAN_ACTION_PATH=$(echo "$RAW_PATH" | sed 's|/\./|/|g' | sed 's|^\./||')
-      
-      # Jika jalurnya masih relatif, ubah jadi absolut dari workspace
+
+      # If the path is still relative, make it absolute from workspace
       if [[ "$CLEAN_ACTION_PATH" == .github* ]]; then
         CLEAN_ACTION_PATH="$GITHUB_WORKSPACE/$CLEAN_ACTION_PATH"
       fi
 
-      echo "Jalur folder patches yang valid: $CLEAN_ACTION_PATH/patches"
+      echo "Valid patches folder path: $CLEAN_ACTION_PATH/patches"
 
-      # Eksekusi penyalinan menggunakan path yang sudah bersih
+      # Copy using the cleaned path
       cp "$CLEAN_ACTION_PATH/patches/beatrice/beatrice_core.c" drivers/beatrice/beatrice_core.c
 
       MAKEFILE_SRC=$(find "$CLEAN_ACTION_PATH/patches/beatrice/" -iname "makefile" | head -1)
       if [ -z "$MAKEFILE_SRC" ]; then
-        echo "ERROR: File Makefile/makefile tidak ditemukan di folder beatrice"
+        echo "ERROR: Makefile/makefile not found in beatrice folder"
         ls -la "$CLEAN_ACTION_PATH/patches/beatrice/"
         exit 1
       fi
       cp "$MAKEFILE_SRC" drivers/beatrice/Makefile
 
-      # Daftarkan ke Makefile utama drivers kernel
+      # Register with the main kernel drivers Makefile
       if ! grep -q "beatrice/" drivers/Makefile; then
         echo "obj-y += beatrice/" >> drivers/Makefile
       fi
 
-      echo "✅ Driver Beatrice berhasil disuntikkan!"
+      echo "✅ Beatrice driver injected successfully!"
 
+  - name: 'Debug - List Tenebrion Patch Files'
+    shell: bash
+    run: |
+      echo "=== Tenebrion folder contents ==="
+      ls -la "${{ github.action_path }}/patches/tenebrion/" || echo "FOLDER NOT FOUND"
+
+  - name: 'Inject Tenebrion CPU/Cpuset Driver'
+    shell: bash
+    working-directory: ${{ github.workspace }}/kernel/common
+    run: |
+      set -euo pipefail
+
+      echo "=== Injecting Tenebrion module ==="
+      mkdir -p drivers/tenebrion
+
+      RAW_PATH="${{ github.action_path }}"
+      CLEAN_ACTION_PATH=$(echo "$RAW_PATH" | sed 's|/\./|/|g' | sed 's|^\./||')
+
+      if [[ "$CLEAN_ACTION_PATH" == .github* ]]; then
+        CLEAN_ACTION_PATH="$GITHUB_WORKSPACE/$CLEAN_ACTION_PATH"
+      fi
+
+      echo "Valid patches folder path: $CLEAN_ACTION_PATH/patches/tenebrion"
+
+      TENEBRION_SRC="$CLEAN_ACTION_PATH/patches/tenebrion/tenebrion.c"
+      if [ ! -f "$TENEBRION_SRC" ]; then
+        echo "ERROR: tenebrion.c not found at $TENEBRION_SRC"
+        ls -la "$CLEAN_ACTION_PATH/patches/tenebrion/" || true
+        exit 1
+      fi
+      cp "$TENEBRION_SRC" drivers/tenebrion/tenebrion.c
+
+      MAKEFILE_SRC=$(find "$CLEAN_ACTION_PATH/patches/tenebrion/" -iname "makefile" | head -1)
+      if [ -z "$MAKEFILE_SRC" ]; then
+        echo "ERROR: Makefile/makefile not found in tenebrion folder"
+        ls -la "$CLEAN_ACTION_PATH/patches/tenebrion/"
+        exit 1
+      fi
+      cp "$MAKEFILE_SRC" drivers/tenebrion/Makefile
+
+      if ! grep -q "tenebrion/" drivers/Makefile; then
+        echo "obj-y += tenebrion/" >> drivers/Makefile
+      fi
+
+      echo "✅ Tenebrion driver injected successfully!"
+
+  - name: 'Inject Tenebrion SELinux Rules'
+    shell: bash
+    working-directory: ${{ github.workspace }}/kernel/common
+    run: |
+      set -euo pipefail
+
+      RAW_PATH="${{ github.action_path }}"
+      CLEAN_ACTION_PATH=$(echo "$RAW_PATH" | sed 's|/\./|/|g' | sed 's|^\./||')
+      if [[ "$CLEAN_ACTION_PATH" == .github* ]]; then
+        CLEAN_ACTION_PATH="$GITHUB_WORKSPACE/$CLEAN_ACTION_PATH"
+      fi
+
+      SELINUX_SCRIPT_SRC="$CLEAN_ACTION_PATH/patches/tenebrion/selinux.sh"
+      if [ ! -f "$SELINUX_SCRIPT_SRC" ]; then
+        echo "ERROR: selinux.sh not found at $SELINUX_SCRIPT_SRC"
+        ls -la "$CLEAN_ACTION_PATH/patches/tenebrion/" || true
+        exit 1
+      fi
+      cp "$SELINUX_SCRIPT_SRC" ./selinux.sh
+      chmod +x ./selinux.sh
+
+      echo "=== Searching for KernelSU-Next rules.c ==="
+      RULES_FILE=$(find . -path "*kernelsu*" -iname "rules.c" 2>/dev/null | head -1)
+
+      if [[ -z "$RULES_FILE" ]]; then
+        echo "❌ rules.c not found in this KernelSU-Next source tree."
+        echo "Directory structure related to kernelsu/ksu:"
+        find . -iname "*kernelsu*" -o -iname "*ksu*" 2>/dev/null | grep -v "\.git" || true
+        exit 1
+      fi
+      echo "✅ Found: $RULES_FILE"
+
+      if ! grep -qF 'rcu_assign_pointer(selinux_state.policy, pol);' "$RULES_FILE"; then
+        echo "❌ Marker line not found in $RULES_FILE"
+        cat "$RULES_FILE"
+        exit 1
+      fi
+      if ! grep -q "ksu_allow" "$RULES_FILE"; then
+        echo "❌ ksu_allow function not found in $RULES_FILE"
+        exit 1
+      fi
+
+      export SELINUX_RULES_C="$RULES_FILE"
+      ./selinux.sh
+
+      echo "✅ Tenebrion SELinux rules injected successfully"
+      grep -B2 -A35 "sysfs_leds" "$RULES_FILE" | head -40
 
   - name: 'Build Kernel'
     shell: bash
