@@ -38,145 +38,90 @@ runs:
     if: false
     uses: ./.github/actions/set-kernel-config
 
-  - name: 'Debug - List Beatrice Patch Files'
-    shell: bash
-    run: |
-      echo "=== Beatrice folder contents ==="
-      ls -la "${{ github.action_path }}/patches/beatrice/" || echo "FOLDER NOT FOUND"
-
   - name: 'Inject Beatrice Sysfs Driver'
     shell: bash
-    working-directory: ${{ github.workspace }}/kernel/common
     run: |
       set -euo pipefail
+      echo "=== Menyuntikkan Modul Beatrice ==="
+      
+      TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
+      mkdir -p "$TARGET_DIR/drivers/beatrice"
+      
+      # Masuk langsung ke folder patches internal aksi ini
+      cd "${{ github.action_path }}/patches/beatrice"
+      
+      # Salin menggunakan wildcard agar kebal perbedaan huruf besar/kecil
+      cp beatrice_core.c "$TARGET_DIR/drivers/beatrice/beatrice_core.c"
+      cp [Mm]akefile "$TARGET_DIR/drivers/beatrice/Makefile"
 
-      echo "=== Injecting Beatrice module ==="
-      mkdir -p drivers/beatrice
-
-      # Clean up the './' segments in the action path that cause glitches
-      RAW_PATH="${{ github.action_path }}"
-      CLEAN_ACTION_PATH=$(echo "$RAW_PATH" | sed 's|/\./|/|g' | sed 's|^\./||')
-
-      # If the path is still relative, make it absolute from workspace
-      if [[ "$CLEAN_ACTION_PATH" == .github* ]]; then
-        CLEAN_ACTION_PATH="$GITHUB_WORKSPACE/$CLEAN_ACTION_PATH"
+      # Daftarkan ke Makefile utama drivers
+      if ! grep -q "beatrice/" "$TARGET_DIR/drivers/Makefile"; then
+        echo "obj-y += beatrice/" >> "$TARGET_DIR/drivers/Makefile"
       fi
 
-      echo "Valid patches folder path: $CLEAN_ACTION_PATH/patches"
-
-      # Copy using the cleaned path
-      cp "$CLEAN_ACTION_PATH/patches/beatrice/beatrice_core.c" drivers/beatrice/beatrice_core.c
-
-      MAKEFILE_SRC=$(find "$CLEAN_ACTION_PATH/patches/beatrice/" -iname "makefile" | head -1)
-      if [ -z "$MAKEFILE_SRC" ]; then
-        echo "ERROR: Makefile/makefile not found in beatrice folder"
-        ls -la "$CLEAN_ACTION_PATH/patches/beatrice/"
-        exit 1
-      fi
-      cp "$MAKEFILE_SRC" drivers/beatrice/Makefile
-
-      # Register with the main kernel drivers Makefile
-      if ! grep -q "beatrice/" drivers/Makefile; then
-        echo "obj-y += beatrice/" >> drivers/Makefile
-      fi
-
-      echo "✅ Beatrice driver injected successfully!"
-
-  - name: 'Debug - List Tenebrion Patch Files'
-    shell: bash
-    run: |
-      echo "=== Tenebrion folder contents ==="
-      ls -la "${{ github.action_path }}/patches/tenebrion/" || echo "FOLDER NOT FOUND"
+      echo "✅ Driver Beatrice berhasil disuntikkan dengan aman!"
 
   - name: 'Inject Tenebrion CPU/Cpuset Driver'
     shell: bash
-    working-directory: ${{ github.workspace }}/kernel/common
     run: |
       set -euo pipefail
+      echo "=== Menyuntikkan Modul Tenebrion ==="
+      
+      TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
+      mkdir -p "$TARGET_DIR/drivers/tenebrion"
+      
+      # Masuk langsung ke folder patches internal aksi ini
+      cd "${{ github.action_path }}/patches/tenebrion"
+      
+      cp tenebrion.c "$TARGET_DIR/drivers/tenebrion/tenebrion.c"
+      cp [Mm]akefile "$TARGET_DIR/drivers/tenebrion/Makefile"
 
-      echo "=== Injecting Tenebrion module ==="
-      mkdir -p drivers/tenebrion
-
-      RAW_PATH="${{ github.action_path }}"
-      CLEAN_ACTION_PATH=$(echo "$RAW_PATH" | sed 's|/\./|/|g' | sed 's|^\./||')
-
-      if [[ "$CLEAN_ACTION_PATH" == .github* ]]; then
-        CLEAN_ACTION_PATH="$GITHUB_WORKSPACE/$CLEAN_ACTION_PATH"
+      if ! grep -q "tenebrion/" "$TARGET_DIR/drivers/Makefile"; then
+        echo "obj-y += tenebrion/" >> "$TARGET_DIR/drivers/Makefile"
       fi
 
-      echo "Valid patches folder path: $CLEAN_ACTION_PATH/patches/tenebrion"
-
-      TENEBRION_SRC="$CLEAN_ACTION_PATH/patches/tenebrion/tenebrion.c"
-      if [ ! -f "$TENEBRION_SRC" ]; then
-        echo "ERROR: tenebrion.c not found at $TENEBRION_SRC"
-        ls -la "$CLEAN_ACTION_PATH/patches/tenebrion/" || true
-        exit 1
-      fi
-      cp "$TENEBRION_SRC" drivers/tenebrion/tenebrion.c
-
-      MAKEFILE_SRC=$(find "$CLEAN_ACTION_PATH/patches/tenebrion/" -iname "makefile" | head -1)
-      if [ -z "$MAKEFILE_SRC" ]; then
-        echo "ERROR: Makefile/makefile not found in tenebrion folder"
-        ls -la "$CLEAN_ACTION_PATH/patches/tenebrion/"
-        exit 1
-      fi
-      cp "$MAKEFILE_SRC" drivers/tenebrion/Makefile
-
-      if ! grep -q "tenebrion/" drivers/Makefile; then
-        echo "obj-y += tenebrion/" >> drivers/Makefile
-      fi
-
-      echo "✅ Tenebrion driver injected successfully!"
+      echo "✅ Driver Tenebrion berhasil disuntikkan dengan aman!"
 
   - name: 'Inject Tenebrion SELinux Rules'
     shell: bash
     working-directory: ${{ github.workspace }}/kernel/common
     run: |
       set -euo pipefail
+      echo "=== Menyuntikkan Aturan SELinux Tenebrion ==="
 
-      RAW_PATH="${{ github.action_path }}"
-      CLEAN_ACTION_PATH=$(echo "$RAW_PATH" | sed 's|/\./|/|g' | sed 's|^\./||')
-      if [[ "$CLEAN_ACTION_PATH" == .github* ]]; then
-        CLEAN_ACTION_PATH="$GITHUB_WORKSPACE/$CLEAN_ACTION_PATH"
-      fi
-
-      SELINUX_SCRIPT_SRC="$CLEAN_ACTION_PATH/patches/tenebrion/selinux.sh"
-      if [ ! -f "$SELINUX_SCRIPT_SRC" ]; then
-        echo "ERROR: selinux.sh not found at $SELINUX_SCRIPT_SRC"
-        exit 1
-      fi
-      cp "$SELINUX_SCRIPT_SRC" ./selinux.sh
+      # Ambil script selinux.sh dari folder patches
+      cd "${{ github.action_path }}/patches/tenebrion"
+      cp selinux.sh "$GITHUB_WORKSPACE/kernel/common/selinux.sh"
+      
+      # Kembali ke direktori kernel untuk mencari rules.c KSU
+      cd "$GITHUB_WORKSPACE/kernel/common"
       chmod +x ./selinux.sh
 
-      echo "=== Full contents of drivers/kernelsu ==="
-      find drivers/kernelsu -type f | sort
-
-      echo "=== Searching for rules.c specifically inside drivers/kernelsu ==="
-      RULES_FILE=$(find drivers/kernelsu -iname "rules.c" 2>/dev/null | head -1)
+      # Cari rules.c secara mendalam di semua subdirektori KernelSU
+      RULES_FILE=$(find drivers/kernelsu -type f -name "rules.c" 2>/dev/null | head -1)
 
       if [[ -z "$RULES_FILE" ]]; then
-        echo "❌ No rules.c inside drivers/kernelsu."
-        echo "=== Searching for any file containing 'ksu_allow' or SELinux policy logic ==="
-        grep -rl "ksu_allow\|selinux_state.policy\|policydb" drivers/kernelsu 2>/dev/null || echo "No matches found either."
+        echo "❌ File rules.c tidak ditemukan di dalam struktur KernelSU!"
         exit 1
       fi
-      echo "✅ Found: $RULES_FILE"
+      
+      echo "✅ Ditemukan: $RULES_FILE"
 
       if ! grep -qF 'rcu_assign_pointer(selinux_state.policy, pol);' "$RULES_FILE"; then
-        echo "❌ Marker line not found in $RULES_FILE"
-        cat "$RULES_FILE"
+        echo "❌ Marker line rcu_assign_pointer tidak ditemukan di $RULES_FILE"
         exit 1
       fi
+      
       if ! grep -q "ksu_allow" "$RULES_FILE"; then
-        echo "❌ ksu_allow function not found in $RULES_FILE"
+        echo "❌ Fungsi ksu_allow tidak ditemukan di $RULES_FILE"
         exit 1
       fi
 
       export SELINUX_RULES_C="$RULES_FILE"
       ./selinux.sh
 
-      echo "✅ Tenebrion SELinux rules injected successfully"
-      grep -B2 -A35 "sysfs_leds" "$RULES_FILE" | head -40
+      echo "✅ Tenebrion SELinux rules berhasil disuntikkan!"
+      grep -B2 -A35 "sysfs_leds" "$RULES_FILE" | head -40 || true
 
   - name: 'Build Kernel'
     shell: bash
