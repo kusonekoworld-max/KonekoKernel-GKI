@@ -202,3 +202,16 @@ runs:
           CONFIG_SCHED_MC=y
           CONFIG_NO_HZ_IDLE=y
           CONFIG_NO_HZ_FULL=n
+- name: Add Beatrice sysfs + uevent interface
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        mkdir -p drivers/beatrice
+        cp "${{ github.workspace }}/kernel_patches/beatrice/beatrice_core.c" drivers/beatrice/beatrice_core.c
+        cp "${{ github.workspace }}/kernel_patches/beatrice/Makefile" drivers/beatrice/Makefile
+
+        if ! grep -q "beatrice/" drivers/Makefile; then
+          echo "obj-y += beatrice/" >> drivers/Makefile
+        fi
+
+        echo "✅ Beatrice sysfs interface added"
