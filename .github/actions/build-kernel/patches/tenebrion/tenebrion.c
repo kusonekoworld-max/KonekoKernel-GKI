@@ -1,7 +1,8 @@
-// tenebrion.c
-// SPDX-License-Identifier: GPL-3.0-only
-// Tenebrion — Screen state based CPU frequency throttler + cpuset limiter
-// Author: Kanagawa Yamada
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * tenebrion.c
+ * Author: Kanagawa Yamada
+ */
 
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -14,18 +15,30 @@
 #include <linux/pm_qos.h>
 #include <linux/slab.h>
 #include <linux/cpumask.h>
+#include <linux/string.h>
 
 #define POLL_INTERVAL_MS    3000
 #define DPMS_PATH           "/sys/class/drm/card0-DSI-1/dpms"
 #define BACKLIGHT_PATH      "/sys/class/leds/lcd-backlight/brightness"
 
-/*
- * cpuset paths that get restricted when screen is off.
- * top-app / foreground are intentionally left alone — the system
- * scheduler already won't run heavy foreground work while the
- * screen is off, and touching those sets causes jank on wake.
- */
 #define CPUSET_SYSBG_PATH   "/dev/cpuset/system-background/cpus"
+#define CPUSET_BG_PATH      "/dev/cpuset/background/cpus"
+
+/* ZRAM enforcer target */
+#define ZRAM_COMP_PATH       "/sys/block/zram0/comp_algorithm"
+#define ZRAM_COMP_ALGO       "zstd"
+
+
+static const char *iosched_candidates[] = {
+    "/sys/block/sda/queue/scheduler",
+    "/sys/block/mmcblk0/queue/scheduler",
+    "/sys/block/nvme0n1/queue/scheduler",
+    NULL,
+};
+#define IOSCHED_TARGET   "bfq"
+
+#define BOOT_DELAY_MS        40000
+#define BOOT_DELAY_STEP_MS   100
 
 MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
 
@@ -41,14 +54,13 @@ static bool is_screen_off = false;
 static DEFINE_MUTEX(tenebrion_lock);
 static struct task_struct *watcher_thread;
 
-/* QoS requests per policy CPU */
 static struct freq_qos_request tenebrion_min_req[NR_CPUS];
 static struct freq_qos_request tenebrion_max_req[NR_CPUS];
 static bool qos_initialized[NR_CPUS];
 
-/* ------------------------------------------------------------------ */
-/* File helpers                                                         */
-/* ------------------------------------------------------------------ */
+static char iosched_path[64] = "";
+static char iosched_saved[32] = "";
+static bool iosched_available = false;
 
 static int tenebrion_read_file(const char *path, char *buf, size_t size)
 {
@@ -64,7 +76,6 @@ static int tenebrion_read_file(const char *path, char *buf, size_t size)
     filp_close(f, NULL);
 
     if (ret > 0) {
-        /* strip trailing newline so comparisons are clean */
         if (buf[ret - 1] == '\n')
             buf[ret - 1] = '\0';
         else
@@ -94,33 +105,40 @@ static int tenebrion_write_file(const char *path, const char *buf)
     return ret > 0 ? 0 : -1;
 }
 
-/* ------------------------------------------------------------------ */
-/* Path auto-detection                                                  */
-/* Tries both known paths once; if neither works, marks UNSUPPORTED.  */
-/* ------------------------------------------------------------------ */
+
+static void enforce_zstd_compression(void)
+{
+    struct file *f;
+    loff_t pos = 0;
+
+    f = filp_open(ZRAM_COMP_PATH, O_WRONLY, 0);
+    if (!IS_ERR(f)) {
+        kernel_write(f, ZRAM_COMP_ALGO, strlen(ZRAM_COMP_ALGO), &pos);
+        filp_close(f, NULL);
+        pr_info("tenebrion: ZRAM enforced to %s success!\n", ZRAM_COMP_ALGO);
+    } else {
+        pr_warn("tenebrion: failed to enforce %s (is ZRAM enabled?)\n",
+                ZRAM_COMP_ALGO);
+    }
+}
 
 static enum tenebrion_path tenebrion_detect_path(void)
 {
     char buf[64];
 
     if (tenebrion_read_file(DPMS_PATH, buf, sizeof(buf)) > 0) {
-        pr_info("tenebrion: detected path → %s\n", DPMS_PATH);
+        pr_info("tenebrion: detected path -> %s\n", DPMS_PATH);
         return PATH_DPMS;
     }
 
     if (tenebrion_read_file(BACKLIGHT_PATH, buf, sizeof(buf)) > 0) {
-        pr_info("tenebrion: detected path → %s\n", BACKLIGHT_PATH);
+        pr_info("tenebrion: detected path -> %s\n", BACKLIGHT_PATH);
         return PATH_BACKLIGHT;
     }
 
-    pr_err("tenebrion: no supported screen state path found — disabling\n");
+    pr_err("tenebrion: no supported screen state path found - disabling\n");
     return PATH_UNSUPPORTED;
 }
-
-/* ------------------------------------------------------------------ */
-/* Screen state detection                                               */
-/* Returns: 1 = on, 0 = off, -1 = unknown                             */
-/* ------------------------------------------------------------------ */
 
 static int tenebrion_get_screen_state(void)
 {
@@ -151,50 +169,117 @@ static int tenebrion_get_screen_state(void)
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* cpuset helpers                                                       */
-/* ------------------------------------------------------------------ */
 
-/*
- * Build a cpumask string that covers only CPU 0 — the safest single
- * core to leave for background work regardless of topology.
- * On screen-off we pin background and system-background cpusets to
- * CPU0 only; everything else stays as-is so foreground/top-app are
- * not affected.
- */
 #define CPUSET_SCREEN_OFF   "0\n"
 
 static char saved_sysbg_cpus[32] = "";
+static char saved_bg_cpus[32]    = "";
+
+static void tenebrion_cpuset_restrict_one(const char *path, char *saved_buf,
+                                          size_t saved_size)
+{
+    tenebrion_read_file(path, saved_buf, saved_size);
+
+    if (tenebrion_write_file(path, CPUSET_SCREEN_OFF) == 0)
+        pr_info("tenebrion: cpuset %s -> 0\n", path);
+}
+
+static void tenebrion_cpuset_restore_one(const char *path, const char *saved_buf)
+{
+    char buf[32];
+    char fallback_mask[32];
+    int total_cores = num_possible_cpus();
+
+    snprintf(fallback_mask, sizeof(fallback_mask), "0-%d", total_cores - 1);
+
+    snprintf(buf, sizeof(buf), "%s\n",
+             saved_buf[0] ? saved_buf : fallback_mask);
+
+    if (tenebrion_write_file(path, buf) == 0)
+        pr_info("tenebrion: cpuset %s restored -> %s", path, buf);
+}
 
 static void tenebrion_cpuset_restrict(void)
 {
-    /* Save current mask before overriding */
-    tenebrion_read_file(CPUSET_SYSBG_PATH, saved_sysbg_cpus, sizeof(saved_sysbg_cpus));
-
-    if (tenebrion_write_file(CPUSET_SYSBG_PATH, CPUSET_SCREEN_OFF) == 0)
-        pr_info("tenebrion: system-background cpuset → 0\n");
+    tenebrion_cpuset_restrict_one(CPUSET_SYSBG_PATH, saved_sysbg_cpus,
+                                  sizeof(saved_sysbg_cpus));
+    tenebrion_cpuset_restrict_one(CPUSET_BG_PATH, saved_bg_cpus,
+                                  sizeof(saved_bg_cpus));
 }
 
 static void tenebrion_cpuset_restore(void)
 {
-    char sysbg_buf[32];
-    char fallback_mask[32];
-    int total_cores = num_possible_cpus();
-
-    /* Forge the dynamic mask just in case the read failed (e.g. "0-7", "0-3") */
-    snprintf(fallback_mask, sizeof(fallback_mask), "0-%d", total_cores - 1);
-
-    /* tenebrion_read_file stripped the newline, so we must add it back */
-    snprintf(sysbg_buf, sizeof(sysbg_buf), "%s\n", 
-             saved_sysbg_cpus[0] ? saved_sysbg_cpus : fallback_mask);
-
-    if (tenebrion_write_file(CPUSET_SYSBG_PATH, sysbg_buf) == 0)
-        pr_info("tenebrion: system-background cpuset restored → %s", sysbg_buf);
+    tenebrion_cpuset_restore_one(CPUSET_SYSBG_PATH, saved_sysbg_cpus);
+    tenebrion_cpuset_restore_one(CPUSET_BG_PATH, saved_bg_cpus);
 }
 
-/* ------------------------------------------------------------------ */
-/* QoS init — add requests for all online policy CPUs                  */
-/* ------------------------------------------------------------------ */
+static void tenebrion_iosched_parse_active(const char *raw, char *out, size_t out_size)
+{
+    const char *start = strchr(raw, '[');
+    const char *end;
+
+    out[0] = '\0';
+    if (!start)
+        return;
+
+    start++; /* skip '[' */
+    end = strchr(start, ']');
+    if (!end)
+        return;
+
+    if ((size_t)(end - start) >= out_size)
+        return;
+
+    memcpy(out, start, end - start);
+    out[end - start] = '\0';
+}
+
+static void tenebrion_iosched_detect(void)
+{
+    char buf[128];
+    int i;
+
+    for (i = 0; iosched_candidates[i] != NULL; i++) {
+        if (tenebrion_read_file(iosched_candidates[i], buf, sizeof(buf)) > 0) {
+            strscpy(iosched_path, iosched_candidates[i], sizeof(iosched_path));
+            iosched_available = true;
+            pr_info("tenebrion: I/O scheduler control -> %s\n", iosched_path);
+            return;
+        }
+    }
+
+    pr_warn("tenebrion: no known block device scheduler node found - "
+            "I/O scheduler switching disabled\n");
+    iosched_available = false;
+}
+
+static void tenebrion_iosched_restrict(void)
+{
+    char buf[128];
+
+    if (!iosched_available)
+        return;
+
+    if (tenebrion_read_file(iosched_path, buf, sizeof(buf)) > 0)
+        tenebrion_iosched_parse_active(buf, iosched_saved, sizeof(iosched_saved));
+
+    if (tenebrion_write_file(iosched_path, IOSCHED_TARGET) == 0)
+        pr_info("tenebrion: I/O scheduler -> %s (screen off)\n", IOSCHED_TARGET);
+}
+
+static void tenebrion_iosched_restore(void)
+{
+    if (!iosched_available)
+        return;
+
+    if (!iosched_saved[0]) {
+        pr_warn("tenebrion: no saved I/O scheduler to restore, leaving as-is\n");
+        return;
+    }
+
+    if (tenebrion_write_file(iosched_path, iosched_saved) == 0)
+        pr_info("tenebrion: I/O scheduler restored -> %s\n", iosched_saved);
+}
 
 static void tenebrion_qos_init(void)
 {
@@ -230,10 +315,6 @@ static void tenebrion_qos_init(void)
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* CPUFreq — drop to min via QoS                                       */
-/* ------------------------------------------------------------------ */
-
 static void tenebrion_set_min_freq(void)
 {
     unsigned int cpu;
@@ -245,27 +326,18 @@ static void tenebrion_set_min_freq(void)
             continue;
 
         if (policy->cpu == cpu && qos_initialized[cpu]) {
-            /*
-             * Order matters: bring min_req DOWN first so the QoS
-             * arbiter never sees min > max during the transition,
-             * then clamp max_req down to min_freq.
-             */
             freq_qos_update_request(&tenebrion_min_req[cpu],
                                     policy->cpuinfo.min_freq);
             freq_qos_update_request(&tenebrion_max_req[cpu],
                                     policy->cpuinfo.min_freq);
 
-            pr_info("tenebrion: policy%u → %u KHz (screen off)\n",
+            pr_info("tenebrion: policy%u -> %u KHz (screen off)\n",
                     cpu, policy->cpuinfo.min_freq);
         }
 
         cpufreq_cpu_put(policy);
     }
 }
-
-/* ------------------------------------------------------------------ */
-/* CPUFreq — restore via QoS                                           */
-/* ------------------------------------------------------------------ */
 
 static void tenebrion_restore_freq(void)
 {
@@ -278,11 +350,7 @@ static void tenebrion_restore_freq(void)
             continue;
 
         if (policy->cpu == cpu && qos_initialized[cpu]) {
-            /*
-             * Order matters: raise the max_req ceiling first, then
-             * restore min_req floor.  Reversing this would momentarily
-             * set min > max on the QoS arbiter.
-             */
+        
             freq_qos_update_request(&tenebrion_max_req[cpu],
                                     policy->cpuinfo.max_freq);
             freq_qos_update_request(&tenebrion_min_req[cpu],
@@ -298,9 +366,6 @@ static void tenebrion_restore_freq(void)
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* QoS cleanup                                                          */
-/* ------------------------------------------------------------------ */
 
 static void tenebrion_qos_cleanup(void)
 {
@@ -315,66 +380,56 @@ static void tenebrion_qos_cleanup(void)
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* Screen-off / screen-on actions                                       */
-/* Both cpuset restriction and freq throttle happen together.          */
-/* ------------------------------------------------------------------ */
-
 static void tenebrion_on_screen_off(void)
 {
     tenebrion_set_min_freq();
     tenebrion_cpuset_restrict();
+    tenebrion_iosched_restrict();
     is_screen_off = true;
-    pr_info("tenebrion: screen OFF → CPUs throttled + cpuset restricted "
-            "(online CPUs: %u)\n", num_online_cpus());
+    pr_info("tenebrion: screen OFF -> CPUs throttled + cpusets restricted "
+            "+ I/O scheduler switched (online CPUs: %u)\n", num_online_cpus());
 }
 
 static void tenebrion_on_screen_on(void)
 {
     tenebrion_restore_freq();
     tenebrion_cpuset_restore();
+    tenebrion_iosched_restore();
     is_screen_off = false;
-    pr_info("tenebrion: screen ON → CPUs restored + cpuset restored\n");
+    pr_info("tenebrion: screen ON -> CPUs restored + cpusets restored "
+            "+ I/O scheduler restored\n");
 }
-
-/* ------------------------------------------------------------------ */
-/* Watcher kthread                                                      */
-/* ------------------------------------------------------------------ */
 
 static int tenebrion_watcher(void *data)
 {
     int current_state = -1;
     int last_state    = -1;
+    int waited_ms     = 0;
 
     pr_info("tenebrion: watcher started, polling every %dms\n",
             POLL_INTERVAL_MS);
 
-    /* Wait for Android SELinux policy + KernelSU rules to be applied */
-    msleep(40000);
+    while (waited_ms < BOOT_DELAY_MS) {
+        if (kthread_should_stop())
+            return 0;
+        msleep(BOOT_DELAY_STEP_MS);
+        waited_ms += BOOT_DELAY_STEP_MS;
+    }
 
-    /*
-     * If init already flagged UNSUPPORTED, there is nothing to do.
-     * Exit the thread cleanly rather than burning cycles forever.
-     */
     if (active_path == PATH_UNSUPPORTED) {
-        pr_info("tenebrion: path unsupported — watcher exiting\n");
+        pr_info("tenebrion: path unsupported - watcher exiting\n");
         return 0;
     }
 
-    /* Initialize QoS requests after the boot delay */
     tenebrion_qos_init();
+    tenebrion_iosched_detect();
 
     while (!kthread_should_stop()) {
-        /*
-         * PATH_NONE: detection was inconclusive at init (race with
-         * driver probe). Try once more. If it fails this time, mark
-         * UNSUPPORTED and stop the loop — no point hammering sysfs
-         * every 3 s forever.
-         */
+
         if (active_path == PATH_NONE) {
             active_path = tenebrion_detect_path();
             if (active_path == PATH_UNSUPPORTED) {
-                pr_info("tenebrion: retry failed — watcher exiting\n");
+                pr_info("tenebrion: retry failed - watcher exiting\n");
                 break;
             }
         }
@@ -399,14 +454,10 @@ static int tenebrion_watcher(void *data)
     return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* Init / Exit                                                          */
-/* ------------------------------------------------------------------ */
-
 static int __init tenebrion_init(void)
 {
     memset(qos_initialized, 0, sizeof(qos_initialized));
-    active_path = PATH_NONE;
+    active_path = tenebrion_detect_path();
 
     watcher_thread = kthread_run(tenebrion_watcher, NULL, "tenebrion");
     if (IS_ERR(watcher_thread)) {
@@ -415,8 +466,14 @@ static int __init tenebrion_init(void)
         return PTR_ERR(watcher_thread);
     }
 
-    pr_info("tenebrion: active — path=%d poll=%dms possible_cpus=%u\n",
+    pr_info("tenebrion: active - path=%d poll=%dms possible_cpus=%u\n",
             active_path, POLL_INTERVAL_MS, num_possible_cpus());
+    return 0;
+}
+
+static int __init tenebrion_zram_init(void)
+{
+    enforce_zstd_compression();
     return 0;
 }
 
@@ -435,9 +492,10 @@ static void __exit tenebrion_exit(void)
     pr_info("tenebrion: unloaded\n");
 }
 
+late_initcall(tenebrion_zram_init);
 module_init(tenebrion_init);
 module_exit(tenebrion_exit);
 
-MODULE_LICENSE("GPL v3");
+MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Kanagawa Yamada");
-MODULE_DESCRIPTION("Tenebrion: Screen state based CPU frequency throttler + cpuset limiter");
+MODULE_DESCRIPTION("Tenebrion: Screen state based CPU frequency throttler + cpuset limiter + ZRAM Enforcer + I/O scheduler switch");
