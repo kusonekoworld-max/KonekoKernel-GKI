@@ -47,14 +47,28 @@ runs:
       echo "=== Menyuntikkan Modul Beatrice ==="
       mkdir -p drivers/beatrice
       
-      # Mengambil file murni dari folder patches internal si custom action
-      cp "${{ github.action_path }}/patches/beatrice/beatrice_core.c" drivers/beatrice/beatrice_core.c
-      cp "${{ github.action_path }}/patches/beatrice/Makefile" drivers/beatrice/Makefile
+      # Bersihkan path dari karakter './' yang bikin glitch
+      RAW_PATH="${{ github.action_path }}"
+      CLEAN_ACTION_PATH=$(echo "$RAW_PATH" | sed 's|/\./|/|g' | sed 's|^\./||')
+      
+      # Jika jalurnya masih relatif, ubah jadi absolut dari workspace
+      if [[ "$CLEAN_ACTION_PATH" == .github* ]]; then
+        CLEAN_ACTION_PATH="$GITHUB_WORKSPACE/$CLEAN_ACTION_PATH"
+      fi
+
+      echo "Jalur folder patches yang valid: $CLEAN_ACTION_PATH/patches"
+
+      # Eksekusi penyalinan menggunakan path yang sudah bersih
+      cp "$CLEAN_ACTION_PATH/patches/beatrice/beatrice_core.c" drivers/beatrice/beatrice_core.c
+      cp "$CLEAN_ACTION_PATH/patches/beatrice/Makefile" drivers/beatrice/Makefile
 
       # Daftarkan ke Makefile utama drivers kernel
       if ! grep -q "beatrice/" drivers/Makefile; then
         echo "obj-y += beatrice/" >> drivers/Makefile
       fi
+
+      echo "✅ Driver Beatrice berhasil disuntikkan!"
+
 
   - name: 'Build Kernel'
     shell: bash
