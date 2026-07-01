@@ -37,6 +37,12 @@ runs:
   - name: Setup Kernel Configs
     if: false
     uses: ./.github/actions/set-kernel-config
+ 
+ - name: 'Debug - List Beatrice Patch Files'
+    shell: bash
+    run: |
+      echo "=== Isi folder beatrice ==="
+      ls -la "${{ github.action_path }}/patches/beatrice/" || echo "FOLDER TIDAK DITEMUKAN"
 
   - name: 'Inject Beatrice Sysfs Driver'
     shell: bash
