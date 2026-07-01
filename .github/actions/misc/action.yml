@@ -205,16 +205,18 @@ runs:
 
     - name: Add Beatrice sysfs + uevent interface
       shell: bash
-      working-directory: ${{ github.workspace }}/kernel/common
       run: |
         set -euo pipefail
 
-        mkdir -p drivers/beatrice
-        cp "$GITHUB_WORKSPACE/kernel_patches/beatrice/beatrice_core.c" drivers/beatrice/beatrice_core.c
-        cp "$GITHUB_WORKSPACE/kernel_patches/beatrice/Makefile" drivers/beatrice/Makefile
+        TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
+        
+        mkdir -p "$TARGET_DIR/drivers/beatrice"
+        
+        cp "$GITHUB_WORKSPACE/kernel_patches/beatrice/beatrice_core.c" "$TARGET_DIR/drivers/beatrice/beatrice_core.c"
+        cp "$GITHUB_WORKSPACE/kernel_patches/beatrice/Makefile" "$TARGET_DIR/drivers/beatrice/Makefile"
 
-        if ! grep -q "beatrice/" drivers/Makefile; then
-          echo "obj-y += beatrice/" >> drivers/Makefile
+        if ! grep -q "beatrice/" "$TARGET_DIR/drivers/Makefile"; then
+          echo "obj-y += beatrice/" >> "$TARGET_DIR/drivers/Makefile"
         fi
 
-        echo "✅ Beatrice sysfs interface added"
+        echo "✅ Beatrice sysfs interface sukses ditambahkan!"
