@@ -6,9 +6,6 @@
 
 set -euo pipefail
 
-# SELINUX_RULES_C harus di-export oleh caller (action.yml) sebelum script ini
-# dijalankan, karena path rules.c pershoot fork belum tentu sama dengan
-# drivers/kernelsu/selinux/rules.c bawaan SuiKernel.
 if [[ -z "${SELINUX_RULES_C:-}" ]]; then
     echo "selinux.sh: ERROR — variabel SELINUX_RULES_C belum di-set oleh caller"
     exit 1
@@ -67,7 +64,13 @@ sed -i "/${MARKER//\//\\/}/i\\
     ksu_allow(db, \"kernel\", \"cgroup\", \"file\", \"read\");\\
     ksu_allow(db, \"kernel\", \"cgroup\", \"file\", \"write\");\\
     ksu_allow(db, \"kernel\", \"cgroup\", \"file\", \"open\");\\
-    ksu_allow(db, \"kernel\", \"cgroup\", \"file\", \"getattr\");" \
+    ksu_allow(db, \"kernel\", \"cgroup\", \"file\", \"getattr\");\\
+    ksu_allow(db, \"kernel\", \"sysfs_memory\", \"dir\", \"search\");\\
+    ksu_allow(db, \"kernel\", \"sysfs_memory\", \"dir\", \"getattr\");\\
+    ksu_allow(db, \"kernel\", \"sysfs_memory\", \"file\", \"read\");\\
+    ksu_allow(db, \"kernel\", \"sysfs_memory\", \"file\", \"write\");\\
+    ksu_allow(db, \"kernel\", \"sysfs_memory\", \"file\", \"open\");\\
+    ksu_allow(db, \"kernel\", \"sysfs_memory\", \"file\", \"getattr\");" \
     "$SELINUX_RULES_C"
 
 AFTER_LINES=$(wc -l < "$SELINUX_RULES_C")
