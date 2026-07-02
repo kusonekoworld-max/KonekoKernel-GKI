@@ -1,9 +1,14 @@
+#include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/fs.h>
 #include <linux/pm_qos.h>
 #include <linux/slab.h>
 #include <linux/cpumask.h>
 #include <linux/string.h>
+#include <linux/delay.h>
+#include <linux/kthread.h>
+#include <linux/cpufreq.h>
+#include <linux/kernel.h>
 
 #define POLL_INTERVAL_MS    3000
 #define DPMS_PATH           "/sys/class/drm/card0-DSI-1/dpms"
