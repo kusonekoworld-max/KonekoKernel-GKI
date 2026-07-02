@@ -70,7 +70,17 @@ sed -i "/${MARKER//\//\\/}/i\\
     ksu_allow(db, \"kernel\", \"sysfs_memory\", \"file\", \"read\");\\
     ksu_allow(db, \"kernel\", \"sysfs_memory\", \"file\", \"write\");\\
     ksu_allow(db, \"kernel\", \"sysfs_memory\", \"file\", \"open\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_memory\", \"file\", \"getattr\");" \
+    ksu_allow(db, \"kernel\", \"sysfs_memory\", \"file\", \"getattr\");\\
+    ksu_allow(db, \"kernel\", \"sysfs_thermal\", \"dir\", \"search\");\\
+    ksu_allow(db, \"kernel\", \"sysfs_thermal\", \"dir\", \"getattr\");\\
+    ksu_allow(db, \"kernel\", \"sysfs_thermal\", \"file\", \"read\");\\
+    ksu_allow(db, \"kernel\", \"sysfs_thermal\", \"file\", \"open\");\\
+    ksu_allow(db, \"kernel\", \"sysfs_thermal\", \"file\", \"getattr\");\\
+    ksu_allow(db, \"kernel\", \"sysfs_battery_supply\", \"dir\", \"search\");\\
+    ksu_allow(db, \"kernel\", \"sysfs_battery_supply\", \"dir\", \"getattr\");\\
+    ksu_allow(db, \"kernel\", \"sysfs_battery_supply\", \"file\", \"read\");\\
+    ksu_allow(db, \"kernel\", \"sysfs_battery_supply\", \"file\", \"open\");\\
+    ksu_allow(db, \"kernel\", \"sysfs_battery_supply\", \"file\", \"getattr\");" \
     "$SELINUX_RULES_C"
 
 AFTER_LINES=$(wc -l < "$SELINUX_RULES_C")
