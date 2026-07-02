@@ -21,8 +21,8 @@
 
 #define ZRAM_COMP_PATH       "/sys/block/zram0/comp_algorithm"
 #define ZRAM_COMP_ALGO       "zstd"
-#define ZRAM_RETRY_COUNT     10
-#define ZRAM_RETRY_DELAY_MS  500
+#define ZRAM_RETRY_COUNT     45
+#define ZRAM_RETRY_DELAY_MS  1000
 
 static const char *iosched_candidates[] = {
     "/sys/block/sda/queue/scheduler",
