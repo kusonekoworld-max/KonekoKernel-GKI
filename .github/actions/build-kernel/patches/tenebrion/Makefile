@@ -1,2 +1,1 @@
-# drivers/tenebrion/Makefile
-obj-y += tenebrion.o
+obj-y += MomenToMoiX.c
