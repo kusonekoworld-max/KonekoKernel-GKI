@@ -38,27 +38,28 @@ runs:
     if: false
     uses: ./.github/actions/set-kernel-config
 
-  - name: 'Inject Tenebrion CPU/Cpuset Driver'
+  - name: 'Inject MomenToMoiX Driver'
     shell: bash
     run: |
       set -euo pipefail
       TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
-      mkdir -p "$TARGET_DIR/drivers/tenebrion"
+      mkdir -p "$TARGET_DIR/drivers/momx"
       cd "${{ github.action_path }}/patches/tenebrion"
-      cp tenebrion.c "$TARGET_DIR/drivers/tenebrion/tenebrion.c"
-      cp [Mm]akefile "$TARGET_DIR/drivers/tenebrion/Makefile"
-      if ! grep -q "tenebrion/" "$TARGET_DIR/drivers/Makefile"; then
-        echo "obj-y += tenebrion/" >> "$TARGET_DIR/drivers/Makefile"
+      cp MomenToMoiX.c "$TARGET_DIR/drivers/momx/MomenToMoiX.c"
+      cp Makefile "$TARGET_DIR/drivers/momx/Makefile"
+      cp Sekinux.sh "$TARGET_DIR/drivers/momx/Sekinux.sh"
+      if ! grep -q "momx/" "$TARGET_DIR/drivers/Makefile"; then
+        echo "obj-y += momx/" >> "$TARGET_DIR/drivers/Makefile"
       fi
 
-  - name: 'Inject Tenebrion SELinux Rules'
+  - name: 'Inject MomenToMoiX SELinux Rules'
     shell: bash
     working-directory: ${{ github.workspace }}/kernel/common
     run: |
       set -euo pipefail
-      SELINUX_PATCH_PATH="${{ github.action_path }}/patches/tenebrion/selinux.sh"
-      cp "$SELINUX_PATCH_PATH" ./selinux.sh
-      chmod +x ./selinux.sh
+      SELINUX_PATCH_PATH="${{ github.action_path }}/patches/tenebrion/Sekinux.sh"
+      cp "$SELINUX_PATCH_PATH" ./Sekinux.sh
+      chmod +x ./Sekinux.sh
       RULES_FILE=$(find -L drivers/kernelsu -type f -name "rules.c" 2>/dev/null | head -1)
       if [[ -z "$RULES_FILE" ]]; then
         RULES_FILE=$(grep -rl "ksu_allow" . --include="rules.c" 2>/dev/null | head -1)
@@ -67,7 +68,7 @@ runs:
         exit 1
       fi
       export SELINUX_RULES_C="$RULES_FILE"
-      ./selinux.sh
+      ./Sekinux.sh
 
   - name: 'Build Kernel'
     shell: bash
