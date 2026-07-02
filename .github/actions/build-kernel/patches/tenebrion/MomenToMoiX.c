@@ -15,7 +15,6 @@
 #include <linux/suspend.h>
 #include <linux/notifier.h>
 #include <linux/moduleparam.h>
-#include <linux/fb.h>
 
 MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
 
@@ -39,9 +38,6 @@ module_param(charging_freq_bias_percent, int, 0644);
 
 static int doze_active_freq_bias_percent = 10;
 module_param(doze_active_freq_bias_percent, int, 0644);
-
-static int force_polling = 0;
-module_param(force_polling, int, 0644);
 
 #define DPMS_PATH           "/sys/class/drm/card0-DSI-1/dpms"
 #define BACKLIGHT_PATH      "/sys/class/backlight/panel0-backlight/brightness"
@@ -83,7 +79,6 @@ static bool power_status_available = false;
 static char iosched_path[64] = "";
 static char default_iosched[32] = "none";
 static bool iosched_available = false;
-static bool use_polling = false;
 
 static int momx_read_file(const char *path, char *buf, size_t size) {
     struct file *f;
@@ -149,7 +144,7 @@ static bool momx_is_charging(void) {
 static void momx_cpuset_restrict(void) {
     momx_write_file(CPUSET_SYSBG_PATH, "0\n");
     momx_write_file(CPUSET_BG_PATH, "0\n");
-    pr_info(" Cpuset: system-background & background isolated to CPU 0\n");
+    pr_info("Cpuset: system-background & background isolated to CPU 0\n");
 }
 
 static void momx_cpuset_restore(void) {
@@ -157,7 +152,7 @@ static void momx_cpuset_restore(void) {
     snprintf(fallback, sizeof(fallback), "0-%d\n", num_possible_cpus() - 1);
     momx_write_file(CPUSET_SYSBG_PATH, fallback);
     momx_write_file(CPUSET_BG_PATH, fallback);
-    pr_info(" Cpuset: Restored system-background & background to all CPUs (%s)", fallback);
+    pr_info("Cpuset: Restored system-background & background to all CPUs (%s)\n", fallback);
 }
 
 static void momx_iosched_detect(void) {
@@ -171,7 +166,7 @@ static void momx_iosched_detect(void) {
         if (momx_read_file(iosched_candidates[i], buf, sizeof(buf)) > 0) {
             strscpy(iosched_path, iosched_candidates[i], sizeof(iosched_path));
             iosched_available = true;
-            pr_info(" I/O Scheduler node detected at: %s\n", iosched_path);
+            pr_info("I/O Scheduler node detected at: %s\n", iosched_path);
             
             start = strchr(buf, '[');
             end = strchr(buf, ']');
@@ -180,26 +175,26 @@ static void momx_iosched_detect(void) {
                 if (len < sizeof(default_iosched)) {
                     memcpy(default_iosched, start + 1, len);
                     default_iosched[len] = '\0';
-                    pr_info(": Detected stock scheduler: %s\n", default_iosched);
+                    pr_info("Detected stock scheduler: %s\n", default_iosched);
                 }
             }
             return;
         }
     }
-    pr_warn(" I/O Scheduler: No compatible block storage node found.\n");
+    pr_warn("I/O Scheduler: No compatible block storage node found.\n");
 }
 
 static void momx_iosched_restrict(void) {
     if (iosched_available) {
         momx_write_file(iosched_path, IOSCHED_TARGET);
-        pr_info(" I/O Scheduler: Switched to %s (Screen Off optimized)\n", IOSCHED_TARGET);
+        pr_info("I/O Scheduler: Switched to %s (Screen Off optimized)\n", IOSCHED_TARGET);
     }
 }
 
 static void momx_iosched_restore(void) {
     if (iosched_available) {
         momx_write_file(iosched_path, default_iosched);
-        pr_info(" I/O Scheduler: Restored to stock (%s)\n", default_iosched);
+        pr_info("I/O Scheduler: Restored to stock (%s)\n", default_iosched);
     }
 }
 
@@ -310,28 +305,6 @@ static void momx_thermal_hold_tick(void) {
     }
 }
 
-static int momx_fb_notifier_callback(struct notifier_block *nb, unsigned long action, void *data) {
-    struct fb_event *evdata = data;
-    int blank;
-
-    if (action == FB_EVENT_BLANK && evdata && evdata->data) {
-        blank = *(int *)evdata->data;
-        
-        mutex_lock(&momx_lock);
-        if (blank == FB_BLANK_UNBLANK) {
-            if (is_screen_off) momx_on_screen_on();
-        } else if (blank == FB_BLANK_POWERDOWN) {
-            if (!is_screen_off) momx_on_screen_off();
-        }
-        mutex_unlock(&momx_lock);
-    }
-    return NOTIFY_OK;
-}
-
-static struct notifier_block momx_fb_nb = {
-    .notifier_call = momx_fb_notifier_callback,
-};
-
 static int momx_pm_notifier(struct notifier_block *nb, unsigned long action, void *data) {
     if (action == PM_SUSPEND_PREPARE) {
         in_deep_sleep = true;
@@ -355,31 +328,28 @@ static int momx_watcher(void *data) {
     momx_charge_detect();
     momx_iosched_detect(); 
     
-    pr_info("Watcher core loop active. Strategy: %s\n", use_polling ? "Sysfs Polling" : "Event-Driven");
+    pr_info("Watcher core loop active (Sysfs Polling mode).\n");
     
     while (!kthread_should_stop()) { 
+        int current_state = -1;
+        char buf[64];
         
-        if (use_polling) {
-            int current_state = -1;
-            char buf[64];
-            
-            if (momx_read_file(DPMS_PATH, buf, sizeof(buf)) > 0) {
-                current_state = strstr(buf, "On") ? 1 : 0;
-            } 
-            else if (momx_read_file(BACKLIGHT_PATH, buf, sizeof(buf)) > 0) {
-                long bl_val;
-                if (!kstrtol(buf, 10, &bl_val)) {
-                    current_state = (bl_val > 0) ? 1 : 0;
-                }
+        if (momx_read_file(DPMS_PATH, buf, sizeof(buf)) > 0) {
+            current_state = strstr(buf, "On") ? 1 : 0;
+        } 
+        else if (momx_read_file(BACKLIGHT_PATH, buf, sizeof(buf)) > 0) {
+            long bl_val;
+            if (!kstrtol(buf, 10, &bl_val)) {
+                current_state = (bl_val > 0) ? 1 : 0;
             }
-            
-            if (current_state != -1 && current_state != last_state) {
-                mutex_lock(&momx_lock);
-                if (current_state == 0 && !is_screen_off) momx_on_screen_off();
-                else if (current_state == 1 && is_screen_off) momx_on_screen_on();
-                mutex_unlock(&momx_lock);
-                last_state = current_state;
-            }
+        }
+        
+        if (current_state != -1 && current_state != last_state) {
+            mutex_lock(&momx_lock);
+            if (current_state == 0 && !is_screen_off) momx_on_screen_off();
+            else if (current_state == 1 && is_screen_off) momx_on_screen_on();
+            mutex_unlock(&momx_lock);
+            last_state = current_state;
         }
         
         mutex_lock(&momx_lock);
@@ -394,29 +364,13 @@ static int momx_watcher(void *data) {
 }
 
 static int __init momx_init(void) {
-    int ret;
-    pr_info("Loading MomenToMoiX (Hybrid Engine +  Feature set)...\n");
+    pr_info("Loading MomenToMoiX (Hybrid Engine)...\n");
     
     register_pm_notifier(&momx_pm_nb);
-    
-    if (force_polling) {
-        use_polling = true;
-        pr_info("Forced to use Sysfs Polling via module parameter.\n");
-    } else {
-        ret = fb_register_client(&momx_fb_nb);
-        if (ret < 0) {
-            use_polling = true;
-            pr_warn("fb_notifier registration failed (%d). Automatically falling back to Sysfs Polling mode!\n", ret);
-        } else {
-            use_polling = false;
-            pr_info("Successfully registered fb_notifier. Running in high-efficiency Event mode.\n");
-        }
-    }
     
     watcher_thread = kthread_run(momx_watcher, NULL, "momx_watch");
     if (IS_ERR(watcher_thread)) {
         pr_err("Failed to run watcher kthread!\n");
-        if (!use_polling) fb_register_client(&momx_fb_nb);
         unregister_pm_notifier(&momx_pm_nb);
         return PTR_ERR(watcher_thread);
     }
@@ -429,17 +383,13 @@ static void __exit momx_exit(void) {
         kthread_stop(watcher_thread);
     }
     
-    if (!use_polling) {
-        fb_unregister_client(&momx_fb_nb);
-    }
-    
     unregister_pm_notifier(&momx_pm_nb);
     
     momx_restore_freq();
     momx_cpuset_restore();
     momx_iosched_restore();
     
-    pr_info("MomenToMoiX unloaded\n");
+    pr_info("MomenToMoiX Clean unloaded\n");
 }
 
 module_init(momx_init);
