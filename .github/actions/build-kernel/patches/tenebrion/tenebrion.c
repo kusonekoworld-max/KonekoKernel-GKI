@@ -1,9 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0
-/*
- * tenebrion.c
- * Author: Kanagawa Yamada
- */
-
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -19,15 +14,15 @@
 
 #define POLL_INTERVAL_MS    3000
 #define DPMS_PATH           "/sys/class/drm/card0-DSI-1/dpms"
-#define BACKLIGHT_PATH      "/sys/class/leds/lcd-backlight/brightness"
+#define BACKLIGHT_PATH      "/sys/class/backlight/panel0-backlight/brightness"
 
 #define CPUSET_SYSBG_PATH   "/dev/cpuset/system-background/cpus"
 #define CPUSET_BG_PATH      "/dev/cpuset/background/cpus"
 
-/* ZRAM enforcer target */
 #define ZRAM_COMP_PATH       "/sys/block/zram0/comp_algorithm"
 #define ZRAM_COMP_ALGO       "zstd"
-
+#define ZRAM_RETRY_COUNT     10
+#define ZRAM_RETRY_DELAY_MS  500
 
 static const char *iosched_candidates[] = {
     "/sys/block/sda/queue/scheduler",
@@ -43,10 +38,10 @@ static const char *iosched_candidates[] = {
 MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
 
 enum tenebrion_path {
-    PATH_NONE        = 0,   /* not yet found — keep retrying            */
-    PATH_DPMS        = 1,   /* /sys/class/drm/.../dpms                  */
-    PATH_BACKLIGHT   = 2,   /* /sys/class/leds/.../brightness           */
-    PATH_UNSUPPORTED = 3,   /* tried and failed — stop searching        */
+    PATH_NONE        = 0,
+    PATH_DPMS        = 1,
+    PATH_BACKLIGHT   = 2,
+    PATH_UNSUPPORTED = 3,
 };
 
 static enum tenebrion_path active_path = PATH_NONE;
@@ -105,7 +100,6 @@ static int tenebrion_write_file(const char *path, const char *buf)
     return ret > 0 ? 0 : -1;
 }
 
-
 static void enforce_zstd_compression(void)
 {
     struct file *f;
@@ -121,6 +115,27 @@ static void enforce_zstd_compression(void)
                 ZRAM_COMP_ALGO);
     }
 }
+
+static int __init tenebrion_zram_init(void)
+{
+    struct file *f;
+    int retry;
+
+    for (retry = 0; retry < ZRAM_RETRY_COUNT; retry++) {
+        f = filp_open(ZRAM_COMP_PATH, O_WRONLY, 0);
+        if (!IS_ERR(f)) {
+            filp_close(f, NULL);
+            enforce_zstd_compression();
+            return 0;
+        }
+        msleep(ZRAM_RETRY_DELAY_MS);
+    }
+
+    pr_warn("tenebrion: zram device never became available after %d retries\n",
+            ZRAM_RETRY_COUNT);
+    return 0;
+}
+late_initcall(tenebrion_zram_init);
 
 static enum tenebrion_path tenebrion_detect_path(void)
 {
@@ -168,7 +183,6 @@ static int tenebrion_get_screen_state(void)
         return -1;
     }
 }
-
 
 #define CPUSET_SCREEN_OFF   "0\n"
 
@@ -222,7 +236,7 @@ static void tenebrion_iosched_parse_active(const char *raw, char *out, size_t ou
     if (!start)
         return;
 
-    start++; /* skip '[' */
+    start++;
     end = strchr(start, ']');
     if (!end)
         return;
@@ -350,7 +364,6 @@ static void tenebrion_restore_freq(void)
             continue;
 
         if (policy->cpu == cpu && qos_initialized[cpu]) {
-        
             freq_qos_update_request(&tenebrion_max_req[cpu],
                                     policy->cpuinfo.max_freq);
             freq_qos_update_request(&tenebrion_min_req[cpu],
@@ -365,7 +378,6 @@ static void tenebrion_restore_freq(void)
         cpufreq_cpu_put(policy);
     }
 }
-
 
 static void tenebrion_qos_cleanup(void)
 {
@@ -416,6 +428,7 @@ static int tenebrion_watcher(void *data)
         waited_ms += BOOT_DELAY_STEP_MS;
     }
 
+    active_path = tenebrion_detect_path();
     if (active_path == PATH_UNSUPPORTED) {
         pr_info("tenebrion: path unsupported - watcher exiting\n");
         return 0;
@@ -425,7 +438,6 @@ static int tenebrion_watcher(void *data)
     tenebrion_iosched_detect();
 
     while (!kthread_should_stop()) {
-
         if (active_path == PATH_NONE) {
             active_path = tenebrion_detect_path();
             if (active_path == PATH_UNSUPPORTED) {
@@ -457,7 +469,7 @@ static int tenebrion_watcher(void *data)
 static int __init tenebrion_init(void)
 {
     memset(qos_initialized, 0, sizeof(qos_initialized));
-    active_path = tenebrion_detect_path();
+    active_path = PATH_NONE;
 
     watcher_thread = kthread_run(tenebrion_watcher, NULL, "tenebrion");
     if (IS_ERR(watcher_thread)) {
@@ -466,14 +478,8 @@ static int __init tenebrion_init(void)
         return PTR_ERR(watcher_thread);
     }
 
-    pr_info("tenebrion: active - path=%d poll=%dms possible_cpus=%u\n",
-            active_path, POLL_INTERVAL_MS, num_possible_cpus());
-    return 0;
-}
-
-static int __init tenebrion_zram_init(void)
-{
-    enforce_zstd_compression();
+    pr_info("tenebrion: active - detection deferred to watcher, poll=%dms possible_cpus=%u\n",
+            POLL_INTERVAL_MS, num_possible_cpus());
     return 0;
 }
 
@@ -492,7 +498,6 @@ static void __exit tenebrion_exit(void)
     pr_info("tenebrion: unloaded\n");
 }
 
-late_initcall(tenebrion_zram_init);
 module_init(tenebrion_init);
 module_exit(tenebrion_exit);
 
