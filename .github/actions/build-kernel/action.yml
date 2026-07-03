@@ -70,6 +70,39 @@ runs:
       export SELINUX_RULES_C="$RULES_FILE"
       ./selinux.sh
 
+  - name: 'Inject Reflex Governor'
+    shell: bash
+    run: |
+      set -euo pipefail
+      TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
+
+      mkdir -p "$TARGET_DIR/kernel/sched"
+      cp "${{ github.action_path }}/patches/reflex/cpufreq_reflex.c" "$TARGET_DIR/kernel/sched/cpufreq_reflex.c"
+
+      if ! grep -q "cpufreq_reflex.o" "$TARGET_DIR/kernel/sched/Makefile"; then
+        echo 'obj-$(CONFIG_CPU_FREQ_GOV_REFLEX) += cpufreq_reflex.o' >> "$TARGET_DIR/kernel/sched/Makefile"
+      fi
+
+      if ! grep -q "config CPU_FREQ_GOV_REFLEX" "$TARGET_DIR/drivers/cpufreq/Kconfig"; then
+        cat << 'EOF' >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+
+config CPU_FREQ_GOV_REFLEX
+	tristate "'reflex' cpufreq governor"
+	depends on CPU_FREQ && SMP
+	select CPU_FREQ_GOV_ATTR_SET
+	help
+	  'reflex' is an advanced CPU frequency governor based on schedutil,
+	  featuring idle-time accounting and PELT-complementary exponential decay.
+EOF
+      fi
+
+      DEFCONFIG_GKI="$TARGET_DIR/arch/arm64/configs/gki_defconfig"
+      if [ -f "$DEFCONFIG_GKI" ]; then
+        if ! grep -q "CONFIG_CPU_FREQ_GOV_REFLEX" "$DEFCONFIG_GKI"; then
+          echo "CONFIG_CPU_FREQ_GOV_REFLEX=y" >> "$DEFCONFIG_GKI"
+        fi
+      fi
+
   - name: 'Build Kernel'
     shell: bash
     working-directory: ${{ github.workspace }}/kernel
