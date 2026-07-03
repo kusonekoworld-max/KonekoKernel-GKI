@@ -84,15 +84,13 @@ runs:
       fi
 
       if ! grep -q "config CPU_FREQ_GOV_REFLEX" "$TARGET_DIR/drivers/cpufreq/Kconfig"; then
-        echo "
-    config CPU_FREQ_GOV_REFLEX
-    	tristate \"'reflex' cpufreq governor\"
-    	depends on CPU_FREQ && SMP
-    	select CPU_FREQ_GOV_ATTR_SET
-    	help
-    	  'reflex' is an advanced CPU frequency governor based on schedutil,
-    	  featuring idle-time accounting and PELT-complementary exponential decay.
-    " >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+        printf "\nconfig CPU_FREQ_GOV_REFLEX\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+        printf "\ttristate \"'reflex' cpufreq governor\"\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+        printf "\tdepends on CPU_FREQ && SMP\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+        printf "\tselect CPU_FREQ_GOV_ATTR_SET\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+        printf "\thelp\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+        printf "\t  'reflex' is an advanced CPU frequency governor based on schedutil,\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+        printf "\t  featuring idle-time accounting and PELT-complementary exponential decay.\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
       fi
 
       DEFCONFIG_GKI="$TARGET_DIR/arch/arm64/configs/gki_defconfig"
