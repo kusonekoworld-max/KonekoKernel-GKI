@@ -285,7 +285,7 @@ static unsigned int rfx_get_next_freq(struct rfx_policy *rfx_pol,
         else
                 freq = policy->cur + (policy->cur >> 2);
 
-        trace_android_vh_map_util_freq(util, freq, max, &next_freq, policy,
+        //trace_android_vh_map_util_freq(util, freq, max, &next_freq, policy,
                                        &rfx_pol->need_freq_update);
         if (next_freq)
                 freq = next_freq;
@@ -319,9 +319,9 @@ static void rfx_get_util(struct rfx_cpu *rfx_c, unsigned long boost)
         unsigned long max_cap = arch_scale_cpu_capacity(rfx_c->cpu);
 
         rfx_c->bw_min = cpu_bw_dl(rq);
-        rfx_c->util   = schedutil_cpu_util(rfx_c->cpu, util, max_cap,
-                                           FREQUENCY_UTIL, NULL);
-        rfx_c->util   = max(rfx_c->util, boost);
+rfx_c->util   = sched_cpu_util(rfx_c->cpu, max_cap);
+rfx_c->util   = max(rfx_c->util, boost);
+
 }
 
 /************************ Hispeed (idle-time accounting) ***********************/
