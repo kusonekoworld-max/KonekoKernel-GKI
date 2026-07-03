@@ -167,7 +167,7 @@ static void momx_iosched_detect(void) {
             strscpy(iosched_path, iosched_candidates[i], sizeof(iosched_path));
             iosched_available = true;
             pr_info("I/O Scheduler node detected at: %s\n", iosched_path);
-            
+
             start = strchr(buf, '[');
             end = strchr(buf, ']');
             if (start && end && (end > start)) {
@@ -253,20 +253,20 @@ static void momx_on_screen_off(void) {
     bool charging;
     int bias;
     int temp;
-    
+
     charging = momx_is_charging();
     bias = charging ? charging_freq_bias_percent : doze_active_freq_bias_percent;
     temp = momx_read_max_temp();
-    
+
     last_temp_mc = temp;
     is_screen_off = true;
-    
+
     pr_info("Display Mode: OFF | Charging: %s | Max Temp: %d mC\n", charging ? "Yes" : "No", temp);
-    
+
     momx_apply_freq_bias(bias);
     momx_cpuset_restrict();
     momx_iosched_restrict();
-    
+
     if (temp >= thermal_threshold_mc) {
         thermal_hold_active = true;
         pr_info("Thermal threshold exceeded (%d >= %d mC). Thermal hold armed.\n", temp, thermal_threshold_mc);
@@ -276,10 +276,10 @@ static void momx_on_screen_off(void) {
 static void momx_on_screen_on(void) {
     is_screen_off = false;
     pr_info("Display Mode: ON\n");
-    
+
     momx_cpuset_restore();
     momx_iosched_restore();
-    
+
     if (thermal_hold_active) {
         thermal_hold_expire = jiffies + msecs_to_jiffies(thermal_hold_ms);
         pr_info("Thermal hold active! Maintaining CPU freq bias restriction for %d ms.\n", thermal_hold_ms);
@@ -291,9 +291,9 @@ static void momx_on_screen_on(void) {
 static void momx_thermal_hold_tick(void) {
     int temp;
     if (!thermal_hold_active || is_screen_off) return;
-    
+
     if (time_before(jiffies, thermal_hold_expire)) return;
-    
+
     temp = momx_read_max_temp();
     if (temp < (thermal_threshold_mc - thermal_hysteresis_mc)) {
         pr_info("Thermal hold expired and temp cooled down (%d mC). Releasing CPU frequencies.\n", temp);
@@ -308,10 +308,8 @@ static void momx_thermal_hold_tick(void) {
 static int momx_pm_notifier(struct notifier_block *nb, unsigned long action, void *data) {
     if (action == PM_SUSPEND_PREPARE) {
         in_deep_sleep = true;
-        pr_info("System entering deep sleep suspend.\n");
     } else if (action == PM_POST_SUSPEND) {
         in_deep_sleep = false;
-        pr_info("System awoken from deep sleep suspend.\n");
     }
     return NOTIFY_OK;
 }
@@ -323,17 +321,17 @@ static int momx_watcher(void *data) {
 
     pr_info("Watcher thread spawned. Sleeping for %d ms boot delay...\n", boot_delay_ms);
     msleep(boot_delay_ms);
-    
+
     momx_qos_init();
     momx_charge_detect();
     momx_iosched_detect(); 
-    
+
     pr_info("Watcher core loop active (Sysfs Polling mode).\n");
-    
+
     while (!kthread_should_stop()) { 
         int current_state = -1;
         char buf[64];
-        
+
         if (momx_read_file(DPMS_PATH, buf, sizeof(buf)) > 0) {
             current_state = strstr(buf, "On") ? 1 : 0;
         } 
@@ -343,7 +341,7 @@ static int momx_watcher(void *data) {
                 current_state = (bl_val > 0) ? 1 : 0;
             }
         }
-        
+
         if (current_state != -1 && current_state != last_state) {
             mutex_lock(&momx_lock);
             if (current_state == 0 && !is_screen_off) momx_on_screen_off();
@@ -351,30 +349,30 @@ static int momx_watcher(void *data) {
             mutex_unlock(&momx_lock);
             last_state = current_state;
         }
-        
+
         mutex_lock(&momx_lock);
         momx_thermal_hold_tick();
         mutex_unlock(&momx_lock);
-        
+
         msleep_interruptible(poll_interval_ms);
     }
-    
+
     pr_info("Watcher thread exiting.\n");
     return 0;
 }
 
 static int __init momx_init(void) {
     pr_info("Loading MomenToMoiX (Hybrid Engine)...\n");
-    
+
     register_pm_notifier(&momx_pm_nb);
-    
+
     watcher_thread = kthread_run(momx_watcher, NULL, "momx_watch");
     if (IS_ERR(watcher_thread)) {
         pr_err("Failed to run watcher kthread!\n");
         unregister_pm_notifier(&momx_pm_nb);
         return PTR_ERR(watcher_thread);
     }
-    
+
     return 0;
 }
 
@@ -382,13 +380,13 @@ static void __exit momx_exit(void) {
     if (watcher_thread) {
         kthread_stop(watcher_thread);
     }
-    
+
     unregister_pm_notifier(&momx_pm_nb);
-    
+
     momx_restore_freq();
     momx_cpuset_restore();
     momx_iosched_restore();
-    
+
     pr_info("MomenToMoiX Clean unloaded\n");
 }
 
