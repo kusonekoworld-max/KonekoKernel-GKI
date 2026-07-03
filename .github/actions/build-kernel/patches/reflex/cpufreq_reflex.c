@@ -285,11 +285,6 @@ static unsigned int rfx_get_next_freq(struct rfx_policy *rfx_pol,
         else
                 freq = policy->cur + (policy->cur >> 2);
 
-                /*trace_android_vh_map_util_freq(
-util, freq, max, &next_freq, policy,
-                                               &
-rfx_pol->need_freq_update);*/
-
         if (next_freq)
                 freq = next_freq;
         else
