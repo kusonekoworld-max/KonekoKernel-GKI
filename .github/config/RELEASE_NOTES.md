@@ -3,14 +3,18 @@
 > [!CAUTION]
 > This software is provided for testing and educational purposes only. Use at your own risk. The developers are not responsible for any damage, data loss, or issues that may occur. Please ensure you have proper backups before installation.
 
-Join the telegram here: https://t.me/WildKernelsTG
+# MomenToMoiX GKI Kernel
+
+**By:** @koneko_dev
+**Kernel Version:** 5.15.208-android13
 
 # Features
 - [KernelSU-Next](#kernelsu-next)
-- [SUSFS v2.2.0](#susfs-v220)
-- [Baseband Guard (BBG)](#baseband-guard-bbg)
-- [DroidSpaces-OSS](#droidspaces-oss)
-- [Networking Improvements](#networking)
+- [SUSFS](#susfs)
+- [MomenToMoiX Driver](#momentomoix-driver)
+- [Memory Management](#memory-management)
+- [Power Management](#power-management)
+- [Scheduler & I/O](#scheduler--io)
 
 ## [KernelSU-Next](https://github.com/pershoot/KernelSU-Next)
 
@@ -19,59 +23,67 @@ A kernel-based root solution for Android devices.
 > [!WARNING]
 > This release uses the [pershoot/KernelSU-Next](https://github.com/pershoot/KernelSU-Next) fork. The fork maintainer has said it is not ready for production use, so treat it as use at your own risk.
 
-Manager: {{KSU_MANAGER}}
+## [SUSFS](https://gitlab.com/simonpunk/susfs4ksu)
 
-> [!IMPORTANT]
-> For best compatiblity ensure your Manager Version and Kernel Version match eg. 30100 = 30100.
+A KSU addon for hiding root using kernel patches and a userspace module.
 
-**Version**  
-`{{KSU_VERSION}}`
+## MomenToMoiX Driver
 
-**Tag**  
-`{{KSU_GIT_TAG}}`
+A smart, adaptive kernel-level optimization driver. It dynamically scales CPU behavior, frequencies, and I/O scheduling in real-time based on Screen State (ON/OFF) and Charging Status.
 
-**Branch**  
-`{{KSUN_BRANCH}}`
+**How it works:**
 
-**Commit**  
-`{{KSUN_COMMIT}}`
+- **Screen OFF (Battery Saver):** Isolates background apps to power-efficient cores (CPU 0), caps max frequency (with a separate bias for charging vs. non-charging states), switches the I/O scheduler to a low-overhead mode, and arms a thermal hold if the device is running hot — maximizing deep sleep and eliminating idle battery drain.
+- **Screen ON (Instant):** Restores stock kernel profiles within milliseconds for a fluid, lag-free experience the moment the screen turns on. If a thermal hold is active, frequency restrictions are extended briefly until temperatures cool down.
 
-## [SUSFS v2.2.0](https://gitlab.com/simonpunk/susfs4ksu)
+**Requirements:**
 
-A KSU addon for hiding root using kernel patches and a userspace module!
+MomenToMoiX detects screen state via `fb_notifier` (event-driven) with automatic fallback to sysfs polling. For the sysfs polling fallback to work, your device needs one of these paths:
 
-Reccomended Module: [susfs4ksu-module by sidex15](https://github.com/sidex15/susfs4ksu-module)
+- DPMS: `/sys/class/drm/card0-DSI-1/dpms`
+- Backlight: `/sys/class/backlight/panel0-backlight/brightness`
 
-- SUS_PATH - Hide suspicious paths
-- SUS_MOUNT - Hide mount points (no CLI support)
-- SUS_KSTAT - Spoof kernel statistics
-- SPOOF_UNAME - Kernel version spoofing
-- SPOOF_CMDLINE - Boot parameter spoofing
-- OPEN_REDIRECT - File access redirection
-- SUS_MAP - Memory mapping protection
-- AVC_SPOOF - Spoof procfs avc denial logs
+**Verify it's running:**
 
-{{SUSFS_BRANCHES}}
+```bash
+su -c 'dmesg -w | grep momx'
+```
+after the device finishes booting.
 
-## [Baseband Guard (BBG)](https://github.com/vc-teahouse/Baseband-guard)
+Based on `@KanagawaYamadaVTeacher`'s Tenebrion logic and SELinux rules.
 
-A lightweight LSM (Linux Security Module) for the Android kernel, designed to block unauthorized writes to critical partitions/device nodes at the system level.
+## Memory Management
 
-## [DroidSpaces-OSS](https://github.com/ravindu644/Droidspaces-OSS)
+- MGLRU (Multi-Generational LRU)
+- ZRAM with ZSTD compression support
+- ZSMALLOC
+- KSM (Kernel Samepage Merging)
+- Compaction & Migration
+- Transparent Huge Pages (THP)
 
-A lightweight, LXC-inspired container runtime for Android and Linux. Run full Linux distributions natively with zero performance penalty.
+## Power Management
 
-## Networking
+- TEO Idle Governor
+- WQ_POWER_EFFICIENT
+- SCHED_MC
+- NO_HZ_IDLE
+- Strict 100 max wakelocks limit with automated GC
 
-- BBRv1 - Improved TCP congestion control
-- Wireguard - Built-in VPN support
-- IP Set & IPv6 NAT Support - Advanced firewall capabilities
-- TTL Target Support - Network packet manipulation
+## Scheduler & I/O
+
+- Full Preemption (CONFIG_PREEMPT)
+- BFQ I/O Scheduler (with Group IOSCHED)
+- MQ-Deadline
+- TCP FastOpen
 
 ## Other Features
 
-- TMPFS_XATTR - Extended attributes for tmpfs (Mountify support)
-- TMPFS_POSIX_ACL - POSIX ACLs for tmpfs
+- Full LTO (Link Time Optimization) builds
+- Google Common Kernel LTS tracking
+
+## Big Thanks
+
+https://github.com/LoggingNewMemory/SuiKernel-Release — Tenebrion logic and SELinux rules
 
 ## Recommended Tools
 
@@ -100,17 +112,7 @@ Install the KernelSU‑Next Manager APK, same version as mentioned in the releas
 Open the KernelSU‑Next app.
 Reboot the device if you performed any cleanup in step 2
 
-## Force Load Kernel Modules (Bypass) — flashing with `Bypass-Image`
+---
 
-> [!IMPORTANT]
-> Most users do not need this. This option does not help bypass root-detection systems — it only replaces the kernel image used during flashing for compatibility workarounds.
+MomenToMoiX Kernel is based on and developed from [WildKernels/GKI_KernelSU_SUSFS](https://github.com/WildKernels/GKI_KernelSU_SUSFS)
 
-**How to enable:**
-- Set `do.flash_bypass=1`, in the anykernel.sh file within the AnyKernel3.zip. 
-
-**Behavior:**
-- If `do.flash_bypass=1` is set it will move `Bypass-Image` to replace the usual `Image` file prior to performing version checks and flashing.
-- If `do.flash_bypass=1` is set and `Bypass-Image` is not found, the installer will abort with an error to avoid accidental forced flashing of an unintended image.
-
-**Why / When to use:**
-- Use this only when a `Normal` flash fails to boot due to kernel module incompatibilities.
