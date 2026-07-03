@@ -312,15 +312,14 @@ static unsigned int rfx_get_next_freq(struct rfx_policy *rfx_pol,
  */
 static void rfx_get_util(struct rfx_cpu *rfx_c, unsigned long boost)
 {
-        struct rq *rq = cpu_rq(rfx_c->cpu);
-        unsigned long util = cpu_util_cfs(rq);
-        unsigned long max_cap = arch_scale_cpu_capacity(rfx_c->cpu);
+	struct rq *rq = cpu_rq(rfx_c->cpu);
+	unsigned long max_cap = arch_scale_cpu_capacity(rfx_c->cpu);
 
-        rfx_c->bw_min = cpu_bw_dl(rq);
-rfx_c->util   = sched_cpu_util(rfx_c->cpu, max_cap);
-rfx_c->util   = max(rfx_c->util, boost);
-
+	rfx_c->bw_min = cpu_bw_dl(rq);
+	rfx_c->util   = sched_cpu_util(rfx_c->cpu, max_cap);
+	rfx_c->util   = max(rfx_c->util, boost);
 }
+
 
 /************************ Hispeed (idle-time accounting) ***********************/
 
