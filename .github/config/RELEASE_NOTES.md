@@ -5,7 +5,7 @@
 
 # MomenToMoiX GKI Kernel
 
-**By:** @koneko_dev t.me/Koneko_dev
+**By:** @koneko_dev [t.me/Koneko_dev](https://t.me/Koneko_dev)
 
 # Features
 - [KernelSU-Next](#kernelsu-next)
