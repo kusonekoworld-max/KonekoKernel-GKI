@@ -99,4 +99,9 @@ TRACE_EVENT(hikari_profile,
 
 #endif /* _TRACE_HIKARI_H */
 
+/* This part must be outside protection */
+#undef TRACE_INCLUDE_PATH
+#undef TRACE_INCLUDE_FILE
+#define TRACE_INCLUDE_PATH trace/events
+#define TRACE_INCLUDE_FILE hikari
 #include <trace/define_trace.h>
