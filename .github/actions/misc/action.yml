@@ -202,6 +202,3 @@ runs:
           CONFIG_SCHED_MC=y
           CONFIG_NO_HZ_IDLE=y
           CONFIG_NO_HZ_FULL=n
-          CONFIG_PSI=y
-          CONFIG_PSI_DEFAULT_DISABLED=n
-
