@@ -465,3 +465,5 @@ TRACE_EVENT(zenith_input_boost,
 #define TRACE_INCLUDE_PATH trace/events
 #define TRACE_INCLUDE_FILE cpufreq_zenith
 #include <trace/define_trace.h>
+#undef TRACE_INCLUDE_PATH
+#undef TRACE_INCLUDE_FILE
