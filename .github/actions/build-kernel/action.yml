@@ -161,16 +161,40 @@ runs:
       # define_trace.h resolves to trace/hooks/<name>.h instead of
       # trace/events/<name>.h. Force-override right before each
       # header's own define_trace.h include, idempotently.
+      #
+      # NOTE: we do NOT undef TRACE_INCLUDE_PATH/TRACE_INCLUDE_FILE
+      # again *after* the #include <trace/define_trace.h> line.
+      # define_trace.h re-includes this same header multiple times
+      # (once per processing stage) while CREATE_TRACE_POINTS is set,
+      # and all of those nested re-includes happen underneath this
+      # single #include line. A trailing #undef here fires on every
+      # nested pass too, so by the time the outer/first pass resumes
+      # and needs TRACE_INCLUDE_PATH/FILE for a later stage, they've
+      # already been undefined by an inner pass -- causing
+      # "'TRACE_INCLUDE_PATH/TRACE_INCLUDE_FILE.h' file not found".
+      # Leaving them defined after the include is safe: each header's
+      # own leading #undef (right before its #define) clears any
+      # stale value from a previously processed header before setting
+      # its own.
       ZENITH_TRACE_H="$TARGET_DIR/include/trace/events/cpufreq_zenith.h"
       HIKARI_TRACE_H="$TARGET_DIR/include/trace/events/hikari.h"
 
       if ! grep -q "TRACE_INCLUDE_PATH trace/events" "$ZENITH_TRACE_H"; then
-        perl -0pi -e 's{(#include <trace/define_trace\.h>)}{#undef TRACE_INCLUDE_PATH\n#undef TRACE_INCLUDE_FILE\n#define TRACE_INCLUDE_PATH trace/events\n#define TRACE_INCLUDE_FILE cpufreq_zenith\n$1\n#undef TRACE_INCLUDE_PATH\n#undef TRACE_INCLUDE_FILE}' "$ZENITH_TRACE_H"
+        perl -0pi -e 's{(#include <trace/define_trace\.h>)}{#undef TRACE_INCLUDE_PATH\n#undef TRACE_INCLUDE_FILE\n#define TRACE_INCLUDE_PATH trace/events\n#define TRACE_INCLUDE_FILE cpufreq_zenith\n$1}' "$ZENITH_TRACE_H"
       fi
 
       if ! grep -q "TRACE_INCLUDE_PATH trace/events" "$HIKARI_TRACE_H"; then
-        perl -0pi -e 's{(#include <trace/define_trace\.h>)}{#undef TRACE_INCLUDE_PATH\n#undef TRACE_INCLUDE_FILE\n#define TRACE_INCLUDE_PATH trace/events\n#define TRACE_INCLUDE_FILE hikari\n$1\n#undef TRACE_INCLUDE_PATH\n#undef TRACE_INCLUDE_FILE}' "$HIKARI_TRACE_H"
+        perl -0pi -e 's{(#include <trace/define_trace\.h>)}{#undef TRACE_INCLUDE_PATH\n#undef TRACE_INCLUDE_FILE\n#define TRACE_INCLUDE_PATH trace/events\n#define TRACE_INCLUDE_FILE hikari\n$1}' "$HIKARI_TRACE_H"
       fi
+
+      # Defensive cleanup: strip any *trailing* TRACE_INCLUDE_PATH/FILE
+      # undef pair that appears right after the header's own
+      # #include <trace/define_trace.h> line (the root cause of the
+      # "file not found" build error described above). Safe/no-op if
+      # the pair isn't present.
+      for TRACE_H in "$ZENITH_TRACE_H" "$HIKARI_TRACE_H"; do
+        perl -0pi -e 's{(#include <trace/define_trace\.h>\n)#undef TRACE_INCLUDE_PATH\n#undef TRACE_INCLUDE_FILE\n}{$1}g' "$TRACE_H"
+      done
 
       if ! grep -q "cpufreq_zenith.o" "$TARGET_DIR/kernel/sched/Makefile"; then
         echo 'obj-$(CONFIG_CPU_FREQ_GOV_ZENITH) += cpufreq_zenith.o' >> "$TARGET_DIR/kernel/sched/Makefile"
