@@ -1,3 +1,4 @@
+
 name: 'Build Kernel'
 description: 'Builds kernel using legacy build.sh or Bazel (kleaf)'
 inputs:
@@ -106,8 +107,13 @@ runs:
       set -euo pipefail
       TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
 
+      # Membuat direktori tujuan di source kernel jika belum ada
       mkdir -p "$TARGET_DIR/kernel/sched"
+      mkdir -p "$TARGET_DIR/include/linux"
+
+      # Menyalin source file (.c) dan header file (.h) dari folder patch repo
       cp "${{ github.action_path }}/patches/zenith/cpufreq_zenith.c" "$TARGET_DIR/kernel/sched/cpufreq_zenith.c"
+      cp "${{ github.action_path }}/patches/zenith/cpufreq_zenith.h" "$TARGET_DIR/include/linux/cpufreq_zenith.h"
 
       if ! grep -q "cpufreq_zenith.o" "$TARGET_DIR/kernel/sched/Makefile"; then
         echo 'obj-$(CONFIG_CPU_FREQ_GOV_ZENITH) += cpufreq_zenith.o' >> "$TARGET_DIR/kernel/sched/Makefile"
