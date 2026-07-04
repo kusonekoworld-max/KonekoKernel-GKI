@@ -137,10 +137,48 @@ runs:
         printf "\t  designed for optimized performance and energy awareness.\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
       fi
 
+      # hikari.c compiles its real hikari_enabled()/hikari_uclamp_*()
+      # definitions unconditionally, but include/linux/hikari.h only
+      # exposes those declarations (instead of its stub inlines) when
+      # CONFIG_HIKARI is set. Nothing previously defined that symbol,
+      # so the header fell back to its stubs and collided with the
+      # real definitions at link/compile time. Define it here, tied
+      # to the governor that actually gates hikari.o in the Makefile.
+      if ! grep -q "config HIKARI" "$TARGET_DIR/drivers/cpufreq/Kconfig"; then
+        printf "\nconfig HIKARI\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+        printf "\tbool \"Hikari wake-time policy engine\"\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+        printf "\tdepends on CPU_FREQ_GOV_ZENITH\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+        printf "\tdefault y\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+        printf "\thelp\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+        printf "\t  Enables the Hikari wake-time policy engine consumed by\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+        printf "\t  the 'zenith' cpufreq governor.\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+      fi
+
+      # Gates hikari_uclamp_boost_amount() / hikari_apply_uclamp_boost():
+      # the per-task uclamp_min wake-time boost actuator. Without this,
+      # IS_ENABLED(CONFIG_HIKARI_UCLAMP) is always false and the boost
+      # path silently compiles out even though hikari_boost_until_ns
+      # and the uclamp_ttl_ms/uclamp_max_pct sysctls are present.
+      if ! grep -q "config HIKARI_UCLAMP" "$TARGET_DIR/drivers/cpufreq/Kconfig"; then
+        printf "\nconfig HIKARI_UCLAMP\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+        printf "\tbool \"Hikari uclamp_min wake-time boost\"\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+        printf "\tdepends on HIKARI\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+        printf "\tdefault y\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+        printf "\thelp\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+        printf "\t  Enables Hikari's time-limited per-task uclamp_min boost\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+        printf "\t  on wake-up, tuned via hikari_uclamp_ttl_ms/hikari_uclamp_max_pct.\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+      fi
+
       DEFCONFIG_GKI="$TARGET_DIR/arch/arm64/configs/gki_defconfig"
       if [ -f "$DEFCONFIG_GKI" ]; then
         if ! grep -q "CONFIG_CPU_FREQ_GOV_ZENITH" "$DEFCONFIG_GKI"; then
           echo "CONFIG_CPU_FREQ_GOV_ZENITH=y" >> "$DEFCONFIG_GKI"
+        fi
+        if ! grep -q "CONFIG_HIKARI=" "$DEFCONFIG_GKI"; then
+          echo "CONFIG_HIKARI=y" >> "$DEFCONFIG_GKI"
+        fi
+        if ! grep -q "CONFIG_HIKARI_UCLAMP" "$DEFCONFIG_GKI"; then
+          echo "CONFIG_HIKARI_UCLAMP=y" >> "$DEFCONFIG_GKI"
         fi
       fi
 
@@ -150,6 +188,7 @@ runs:
     run: |
       set -euo pipefail
       SCHED_H="include/linux/sched.h"
+
       echo "Checking for hikari_flags in sched.h"
       if ! grep -q "hikari_flags;" "$SCHED_H"; then
         echo "Injecting hikari_flags"
@@ -158,6 +197,16 @@ runs:
         echo "Injection successful"
       else
         echo "hikari_flags already present"
+      fi
+
+      echo "Checking for hikari_boost_until_ns in sched.h"
+      if ! grep -q "hikari_boost_until_ns;" "$SCHED_H"; then
+        echo "Injecting hikari_boost_until_ns"
+        sed -i '/struct thread_struct[[:space:]]*thread;/a \
+        \tu32 hikari_boost_until_ns;' "$SCHED_H"
+        echo "Injection successful"
+      else
+        echo "hikari_boost_until_ns already present"
       fi
 
   - name: 'Build Kernel'
