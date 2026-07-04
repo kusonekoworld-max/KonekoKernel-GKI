@@ -105,3 +105,5 @@ TRACE_EVENT(hikari_profile,
 #define TRACE_INCLUDE_PATH trace/events
 #define TRACE_INCLUDE_FILE hikari
 #include <trace/define_trace.h>
+#undef TRACE_INCLUDE_PATH
+#undef TRACE_INCLUDE_FILE
