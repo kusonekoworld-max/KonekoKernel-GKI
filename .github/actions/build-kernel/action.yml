@@ -165,11 +165,11 @@ runs:
       HIKARI_TRACE_H="$TARGET_DIR/include/trace/events/hikari.h"
 
       if ! grep -q "TRACE_INCLUDE_PATH trace/events" "$ZENITH_TRACE_H"; then
-        perl -0pi -e 's{(#include <trace/define_trace\.h>)}{#undef TRACE_INCLUDE_PATH\n#undef TRACE_INCLUDE_FILE\n#define TRACE_INCLUDE_PATH trace/events\n#define TRACE_INCLUDE_FILE cpufreq_zenith\n$1}' "$ZENITH_TRACE_H"
+        perl -0pi -e 's{(#include <trace/define_trace\.h>)}{#undef TRACE_INCLUDE_PATH\n#undef TRACE_INCLUDE_FILE\n#define TRACE_INCLUDE_PATH trace/events\n#define TRACE_INCLUDE_FILE cpufreq_zenith\n$1\n#undef TRACE_INCLUDE_PATH\n#undef TRACE_INCLUDE_FILE}' "$ZENITH_TRACE_H"
       fi
 
       if ! grep -q "TRACE_INCLUDE_PATH trace/events" "$HIKARI_TRACE_H"; then
-        perl -0pi -e 's{(#include <trace/define_trace\.h>)}{#undef TRACE_INCLUDE_PATH\n#undef TRACE_INCLUDE_FILE\n#define TRACE_INCLUDE_PATH trace/events\n#define TRACE_INCLUDE_FILE hikari\n$1}' "$HIKARI_TRACE_H"
+        perl -0pi -e 's{(#include <trace/define_trace\.h>)}{#undef TRACE_INCLUDE_PATH\n#undef TRACE_INCLUDE_FILE\n#define TRACE_INCLUDE_PATH trace/events\n#define TRACE_INCLUDE_FILE hikari\n$1\n#undef TRACE_INCLUDE_PATH\n#undef TRACE_INCLUDE_FILE}' "$HIKARI_TRACE_H"
       fi
 
       if ! grep -q "cpufreq_zenith.o" "$TARGET_DIR/kernel/sched/Makefile"; then
