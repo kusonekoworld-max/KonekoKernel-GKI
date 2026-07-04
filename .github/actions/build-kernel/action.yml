@@ -124,23 +124,24 @@ runs:
       if ! grep -q "zenith_uclamp_rq_get" "$ZENITH_C"; then
         cat > /tmp/zenith_uclamp_shim.txt <<'EOF'
 
-/*
- * Compat shim: this base kernel tree (5.15) predates upstream's
- * uclamp_rq_get()/uclamp_rq_set() wrapper pair in kernel/sched/sched.h.
- * Falls back to the same plain field read the real helper does, so
- * behavior is identical either way.
- */
-#ifdef CONFIG_UCLAMP_TASK
-#ifndef uclamp_rq_get
-static inline unsigned long zenith_uclamp_rq_get(struct rq *rq,
-						  enum uclamp_id clamp_id)
-{
-	return READ_ONCE(rq->uclamp[clamp_id].value);
-}
-#define uclamp_rq_get(rq, clamp_id) zenith_uclamp_rq_get((rq), (clamp_id))
-#endif
-#endif
-EOF
+      /*
+       * Compat shim: this base kernel tree (5.15) predates upstream's
+       * uclamp_rq_get()/uclamp_rq_set() wrapper pair in kernel/sched/sched.h.
+       * Falls back to the same plain field read the real helper does, so
+       * behavior is identical either way.
+       */
+      #ifdef CONFIG_UCLAMP_TASK
+      #ifndef uclamp_rq_get
+      static inline unsigned long zenith_uclamp_rq_get(struct rq *rq,
+      						  enum uclamp_id clamp_id)
+      {
+      	return READ_ONCE(rq->uclamp[clamp_id].value);
+      }
+      #define uclamp_rq_get(rq, clamp_id) zenith_uclamp_rq_get((rq), (clamp_id))
+      #endif
+      #endif
+      EOF
+        sed -i 's/^      //' /tmp/zenith_uclamp_shim.txt
         sed -i '/^#include <linux\/hikari\.h>/r /tmp/zenith_uclamp_shim.txt' "$ZENITH_C"
       fi
 
