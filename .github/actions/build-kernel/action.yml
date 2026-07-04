@@ -105,7 +105,10 @@ runs:
     run: |
       set -euo pipefail
       TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
-
+      cp "${{ github.action_path }}/patches/zenith/cpufreq_zenith.c" "$TARGET_DIR/kernel/sched/cpufreq_zenith.c"
+      cp "${{ github.action_path }}/patches/zenith/hikari.c" "$TARGET_DIR/kernel/sched/hikari.c"
+      sed -i '/unsigned long schedutil_cpu_util(/d' "$TARGET_DIR/kernel/sched/cpufreq_zenith.c"
+      sed -i 's/schedutil_cpu_util/effective_cpu_util/g' "$TARGET_DIR/kernel/sched/cpufreq_zenith.c"
       mkdir -p "$TARGET_DIR/kernel/sched"
       mkdir -p "$TARGET_DIR/include/linux"
       mkdir -p "$TARGET_DIR/include/trace/events"
@@ -286,57 +289,28 @@ runs:
         fi
       fi
 
-  - name: 'Fix schedutil_cpu_util Linkage for Zenith'
+    - name: 'Fix schedutil_cpu_util Linkage for Zenith'
     shell: bash
     run: |
       set -euo pipefail
       TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
-      SCHEDUTIL_C="$TARGET_DIR/kernel/sched/cpufreq_schedutil.c"
-
-      # cpufreq_zenith.c calls schedutil_cpu_util() directly (it feeds
-      # zenith's own util signal through the same uclamp/DL/RT/IRQ
-      # aggregation schedutil uses) and forward-declares it itself
-      # near the top of the file. That silences the compiler's
-      # implicit-declaration warning, but the real definition in
-      # kernel/sched/cpufreq_schedutil.c is `static`, so it has no
-      # external linkage -- ld can compile cpufreq_zenith.o fine but
-      # fails at the final vmlinux link with "undefined symbol:
-      # schedutil_cpu_util". Some Android Common Kernel trees carry a
-      # patch that makes this function non-static specifically so
-      # other governors can reuse it; this base tree doesn't, so we
-      # apply the same fix here, idempotently.
-      if [ ! -f "$SCHEDUTIL_C" ]; then
-        echo "::error::cpufreq_schedutil.c not found at $SCHEDUTIL_C - adjust path for this kernel version"
-        exit 1
-      fi
-
-      if grep -Pzo '(?s)static\s+unsigned\s+long\s+schedutil_cpu_util' "$SCHEDUTIL_C" > /dev/null; then
-        perl -0pi -e 's/(?<![\w])static(\s+unsigned\s+long\s+schedutil_cpu_util)/$1/' "$SCHEDUTIL_C"
-        echo "Removed 'static' from schedutil_cpu_util() definition"
-      elif grep -q 'unsigned long schedutil_cpu_util' "$SCHEDUTIL_C"; then
-        echo "schedutil_cpu_util already has external linkage, no change needed"
-      else
-        echo "::error::schedutil_cpu_util() definition not found in $SCHEDUTIL_C - signature may differ on this kernel version, adjust the pattern"
-        exit 1
-      fi
-
-      # Un-static'ing is not enough on its own: if schedutil is built
-      # as a loadable module (CONFIG_CPU_FREQ_GOV_SCHEDUTIL=m), its
-      # object never becomes part of vmlinux, so a statically-linked
-      # governor like zenith still can't reach the symbol. Force it
-      # built-in.
       DEFCONFIG_GKI="$TARGET_DIR/arch/arm64/configs/gki_defconfig"
+      
+      echo "Ensuring Schedutil is built-in for Zenith compatibility..."
+
       if [ -f "$DEFCONFIG_GKI" ]; then
-        if grep -q '^CONFIG_CPU_FREQ_GOV_SCHEDUTIL=m' "$DEFCONFIG_GKI"; then
-          sed -i 's/^CONFIG_CPU_FREQ_GOV_SCHEDUTIL=m/CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y/' "$DEFCONFIG_GKI"
-          echo "Changed CONFIG_CPU_FREQ_GOV_SCHEDUTIL from m to y"
-        elif ! grep -q '^CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y' "$DEFCONFIG_GKI"; then
-          echo "CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y" >> "$DEFCONFIG_GKI"
-          echo "Added CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y"
+        # Force set to =y. This handles cases where it might be =m or missing entirely.
+        if grep -q '^CONFIG_CPU_FREQ_GOV_SCHEDUTIL' "$DEFCONFIG_GKI"; then
+          sed -i 's/^CONFIG_CPU_FREQ_GOV_SCHEDUTIL.*/CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y/' "$DEFCONFIG_GKI"
         else
-          echo "CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y already set"
+          echo "CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y" >> "$DEFCONFIG_GKI"
         fi
+        echo "CONFIG_CPU_FREQ_GOV_SCHEDUTIL set to y successfully."
+      else
+        echo "::error::gki_defconfig not found at $DEFCONFIG_GKI"
+        exit 1
       fi
+
 
   - name: 'Inject Hikari Flags'
     shell: bash
