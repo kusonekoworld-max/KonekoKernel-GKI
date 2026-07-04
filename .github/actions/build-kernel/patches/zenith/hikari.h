@@ -1,102 +1,221 @@
-/* SPDX-License-Identifier: GPL-2.0 */
-#undef TRACE_SYSTEM
-#define TRACE_SYSTEM hikari
+/* SPDX-License-Identifier: GPL-2.0-only */
+/*
+ * include/linux/hikari.h - Hikari wake-time policy engine public API.
+ *
+ * Hikari observes per-task wake-to-run wait time and reacts via
+ * non-vruntime actuators:
+ *
+ *   - uclamp_min boost (per-task, time-limited)
+ *   - cpufreq frequency floor hint (via notifier chain, picked up by
+ *     a cpufreq governor if present)
+ *   - big.LITTLE wake-up CPU placement steering
+ *
+ * Hikari deliberately does NOT modify vruntime, prio, or any CFS
+ * fairness state.  BORE retains full authority over fairness.
+ *
+ * Default state at runtime: disabled.  Set kernel.hikari_enable=1
+ * to activate.  Even with the master switch on, each task must be
+ * explicitly opted in (per-PID flag, top-app cgroup auto-opt-in,
+ * or kernel API tag) for actuators to fire on it.
+ *
+ * All hooks early-return when the kernel was built without HIKARI
+ * (the stub versions below).  When built but disabled at runtime
+ * they early-return after one READ_ONCE.  Cost on the hot path is
+ * a predictable branch.
+ */
+#ifndef _LINUX_HIKARI_H
+#define _LINUX_HIKARI_H
 
-#if !defined(_TRACE_HIKARI_H) || defined(TRACE_HEADER_MULTI_READ)
-#define _TRACE_HIKARI_H
+#include <linux/types.h>
+#include <linux/cpumask.h>
 
-#include <linux/tracepoint.h>
+struct task_struct;
+struct rq;
+
+/* Bits packed into task_struct::hikari_flags. */
+#define HIKARI_FLAG_OPT_IN		(1u << 0)
+#define HIKARI_FLAG_AUDIO_TAGGED	(1u << 1)
+#define HIKARI_FLAG_FOREGROUND		(1u << 2)
+#define HIKARI_FLAG_BACKGROUND		(1u << 3)
+/* Bits 4..23 reserved for future use; must stay zero in current code. */
 
 /*
- * Emitted from hikari_publish_freq_hint() when Hikari publishes a
- * wake-demand floor hint to cpufreq.  cpu is the target, floor_khz
- * is the hint value, ttl_ms is how long it stays valid, ewma is the
- * smoothed wake-time that triggered the publish.
+ * Per-task "why was the last hot-path call a no-op?" tag.
+ *
+ * Packed into the upper byte of hikari_flags (bits 24..31) so it does
+ * not consume another u32 / ANDROID_KABI slot.  Updated from the
+ * scheduler hot path via cmpxchg only when the value would actually
+ * change (the common "skipped for the same reason as last time" case
+ * costs one READ_ONCE + compare, no atomic).
+ *
+ * Reported through /proc/<pid>/hikari_status as 'hikari_skip_reason: N'
+ * plus a human label.  Lets you tell, for a specific PID, why Hikari
+ * isn't firing for it -- "global disabled" vs "not opted in" vs
+ * "EWMA below wake threshold" vs "placement skipped because not
+ * foreground" vs "actioned" (Hikari did fire on the last call).
+ *
+ * The actuator hot paths (on_dequeue / select_cpu) set this; the
+ * value is an *observability* tag, not authoritative state.  Hikari
+ * decisions still come from the underlying flags / sysctls.
  */
-TRACE_EVENT(hikari_freq_hint,
+#define HIKARI_SKIP_REASON_SHIFT	24
+#define HIKARI_SKIP_REASON_MASK		(0xffu << HIKARI_SKIP_REASON_SHIFT)
 
-	TP_PROTO(int cpu, unsigned int floor_khz, unsigned int ttl_ms,
-		 unsigned long ewma_ns),
-
-	TP_ARGS(cpu, floor_khz, ttl_ms, ewma_ns),
-
-	TP_STRUCT__entry(
-		__field(int,		cpu)
-		__field(unsigned int,	floor_khz)
-		__field(unsigned int,	ttl_ms)
-		__field(unsigned long,	ewma_ns)
-	),
-
-	TP_fast_assign(
-		__entry->cpu		= cpu;
-		__entry->floor_khz	= floor_khz;
-		__entry->ttl_ms		= ttl_ms;
-		__entry->ewma_ns	= ewma_ns;
-	),
-
-	TP_printk("cpu=%d floor=%ukHz ttl=%ums ewma=%luns",
-		  __entry->cpu, __entry->floor_khz,
-		  __entry->ttl_ms, __entry->ewma_ns)
-);
+#define HIKARI_SKIP_NONE		0
+#define HIKARI_SKIP_GLOBAL_DISABLED	1
+#define HIKARI_SKIP_NOT_OPTED_IN	2
+#define HIKARI_SKIP_EWMA_LOW		3
+#define HIKARI_SKIP_PLACEMENT_NOT_TOPAPP 4
+#define HIKARI_SKIP_PLACEMENT_NO_BIG	5
+#define HIKARI_SKIP_PLACEMENT_PINNED	6
+#define HIKARI_SKIP_ACTIONED		7
+#define HIKARI_SKIP_REASON_MAX		HIKARI_SKIP_ACTIONED
 
 /*
- * Emitted from hikari_select_cpu() when placement steering picks a
- * target CPU for a waking task.  original is the CPU the scheduler
- * would have used; selected is Hikari's override (may be the same).
- * idle indicates whether the selected CPU was idle.
+ * Reasons Hikari may self-disable at runtime.  Exposed via
+ * /sys/kernel/hikari/disabled_reason and recorded in dmesg once.
  */
-TRACE_EVENT(hikari_placement,
-
-	TP_PROTO(int original, int selected, bool idle, bool is_big),
-
-	TP_ARGS(original, selected, idle, is_big),
-
-	TP_STRUCT__entry(
-		__field(int,	original)
-		__field(int,	selected)
-		__field(bool,	idle)
-		__field(bool,	is_big)
-	),
-
-	TP_fast_assign(
-		__entry->original	= original;
-		__entry->selected	= selected;
-		__entry->idle		= idle;
-		__entry->is_big		= is_big;
-	),
-
-	TP_printk("orig=%d sel=%d idle=%d big=%d",
-		  __entry->original, __entry->selected,
-		  __entry->idle, __entry->is_big)
-);
+#define HIKARI_DISABLE_NONE		0
+#define HIKARI_DISABLE_SANITY_TASK	2
+#define HIKARI_DISABLE_SANITY_BOOST	3
+#define HIKARI_DISABLE_SANITY_NOTIFIER	4
+#define HIKARI_DISABLE_USER		5
 
 /*
- * Emitted when hikari_apply_profile() changes force-floor tunables.
+ * Notifier chain payload for cpufreq governor consumers.  A
+ * governor (e.g. cpufreq_zenith) registers with
+ * hikari_register_cpufreq_notifier(); when Hikari observes a
+ * wake-time demand on a CPU it fires the chain with this struct
+ * as the data argument.
+ *
+ * floor_khz is a *hint*, not a guarantee.  The consumer is free
+ * to clamp it, ignore it, or apply it for less than ttl_ms.
  */
-TRACE_EVENT(hikari_profile,
+struct hikari_freq_hint {
+	unsigned int cpu;
+	unsigned int floor_khz;
+	unsigned int ttl_ms;
+	unsigned int demand_ns;
+};
 
-	TP_PROTO(unsigned int profile, unsigned int floor_big,
-		 unsigned int floor_little),
+#define HIKARI_NOTIFIER_WAKE_DEMAND	1
 
-	TP_ARGS(profile, floor_big, floor_little),
+#ifdef CONFIG_HIKARI
 
-	TP_STRUCT__entry(
-		__field(unsigned int,	profile)
-		__field(unsigned int,	floor_big)
-		__field(unsigned int,	floor_little)
-	),
+/* Public observer hooks called from the scheduler. */
+void hikari_on_enqueue(struct task_struct *p, struct rq *rq);
+void hikari_on_dequeue(struct task_struct *p, struct rq *rq);
+void hikari_on_wake_up(struct task_struct *p, int target_cpu);
 
-	TP_fast_assign(
-		__entry->profile	= profile;
-		__entry->floor_big	= floor_big;
-		__entry->floor_little	= floor_little;
-	),
+/*
+ * Wake-up CPU placement helper.  Returns a CPU to target for
+ * placement, or -1 if Hikari has no opinion (caller should fall
+ * back to vanilla scheduler logic).  Never returns an invalid or
+ * offline CPU; if it cannot honour the placement preference it
+ * returns -1 instead.
+ */
+int hikari_select_cpu(struct task_struct *p, int prev_cpu, int wake_flags);
 
-	TP_printk("profile=%u floor_big=%u%% floor_little=%u%%",
-		  __entry->profile, __entry->floor_big,
-		  __entry->floor_little)
-);
+/* Kernel-side API for tagging an audio task. */
+void hikari_mark_audio(struct task_struct *p, bool tagged);
 
-#endif /* _TRACE_HIKARI_H */
+/* Kernel-side API for tagging a foreground task. */
+void hikari_mark_foreground(struct task_struct *p, bool tagged);
 
-#include <trace/define_trace.h>
+/*
+ * Kernel-side API for tagging a background task.  Mirrors
+ * hikari_mark_foreground.  Tagged background tasks are subject to
+ * hikari_uclamp_max_pct as a per-task uclamp_max ceiling when the
+ * tunable is non-zero -- this is the inverse of the uclamp_min
+ * boost path which fires on foreground.
+ */
+void hikari_mark_background(struct task_struct *p, bool tagged);
+
+/*
+ * Per-task uclamp_max ceiling helper, called from
+ * uclamp_apply_hikari_boost() in core.c.  Returns the SCHED_CAPACITY
+ * scaled ceiling for this task, or 0 if no ceiling should apply.
+ */
+unsigned int hikari_uclamp_max_ceiling(struct task_struct *p);
+unsigned int hikari_uclamp_boost_amount(struct task_struct *p);
+
+/* Kernel-side opt-in/opt-out API. */
+void hikari_set_opt_in(struct task_struct *p, bool opt_in);
+
+/*
+ * Notifier chain registration.  Governors call this once at init.
+ * Callbacks receive an event constant (currently only
+ * HIKARI_NOTIFIER_WAKE_DEMAND) and a pointer to a
+ * struct hikari_freq_hint.
+ */
+struct notifier_block;
+int hikari_register_cpufreq_notifier(struct notifier_block *nb);
+int hikari_unregister_cpufreq_notifier(struct notifier_block *nb);
+
+/* Master enable check, useful for callers that want to skip work. */
+bool hikari_enabled(void);
+
+/* Profile cross-link used by governors that share profile IDs. */
+void hikari_apply_profile(unsigned int profile);
+
+/* Last wake-demand timestamp, consumed by thermal policy helpers. */
+unsigned long hikari_get_last_demand_jiffies(void);
+
+/*
+ * Direct query for the current wake-time frequency floor on @cpu.
+ * Returns 0 when there is no active floor (Hikari off, no hint
+ * within the TTL window, or the per-CPU floor was zero).  Safe to
+ * call from any context, including the cpufreq governor hot path.
+ */
+unsigned int hikari_get_floor_khz(unsigned int cpu);
+
+/*
+ * Per-task observability helpers, called from fs/proc/base.c to
+ * implement /proc/<pid>/hikari_{enable,audio,stats}.  Kept here
+ * so the only files outside kernel/sched/ that need to know
+ * about Hikari are fs/proc/base.c (call sites) and
+ * include/linux/sched.h (task_struct fields).
+ */
+struct seq_file;
+void hikari_seq_print_stats(struct seq_file *m, struct task_struct *p);
+u32  hikari_task_get_flag(struct task_struct *p, u32 bit);
+void hikari_task_set_flag(struct task_struct *p, u32 bit, bool on);
+
+#else /* !CONFIG_HIKARI */
+
+static inline void hikari_on_enqueue(struct task_struct *p, struct rq *rq) { }
+static inline void hikari_on_dequeue(struct task_struct *p, struct rq *rq) { }
+static inline void hikari_on_wake_up(struct task_struct *p, int target_cpu) { }
+static inline int  hikari_select_cpu(struct task_struct *p, int prev_cpu,
+				     int wake_flags) { return -1; }
+static inline void hikari_mark_audio(struct task_struct *p, bool tagged) { }
+static inline void hikari_mark_foreground(struct task_struct *p, bool tagged) { }
+static inline void hikari_mark_background(struct task_struct *p, bool tagged) { }
+static inline unsigned int hikari_uclamp_max_ceiling(struct task_struct *p)
+	{ return 0; }
+static inline unsigned int hikari_uclamp_boost_amount(struct task_struct *p)
+	{ return 0; }
+static inline void hikari_set_opt_in(struct task_struct *p, bool opt_in) { }
+
+struct notifier_block;
+static inline int hikari_register_cpufreq_notifier(struct notifier_block *nb)
+	{ return 0; }
+static inline int hikari_unregister_cpufreq_notifier(struct notifier_block *nb)
+	{ return 0; }
+
+static inline bool hikari_enabled(void) { return false; }
+static inline void hikari_apply_profile(unsigned int profile) { }
+static inline unsigned long hikari_get_last_demand_jiffies(void) { return 0; }
+static inline unsigned int hikari_get_floor_khz(unsigned int cpu) { return 0; }
+
+struct seq_file;
+static inline void hikari_seq_print_stats(struct seq_file *m,
+					  struct task_struct *p) { }
+static inline u32 hikari_task_get_flag(struct task_struct *p, u32 bit)
+	{ return 0; }
+static inline void hikari_task_set_flag(struct task_struct *p, u32 bit,
+					bool on) { }
+
+#endif /* CONFIG_HIKARI */
+
+#endif /* _LINUX_HIKARI_H */
