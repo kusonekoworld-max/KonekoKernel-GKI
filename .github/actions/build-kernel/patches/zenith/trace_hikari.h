@@ -15,28 +15,28 @@
  */
 TRACE_EVENT(hikari_freq_hint,
 
-	TP_PROTO(int cpu, unsigned int floor_khz, unsigned int ttl_ms,
-		 unsigned long ewma_ns),
+        TP_PROTO(int cpu, unsigned int floor_khz, unsigned int ttl_ms,
+                 unsigned long ewma_ns),
 
-	TP_ARGS(cpu, floor_khz, ttl_ms, ewma_ns),
+        TP_ARGS(cpu, floor_khz, ttl_ms, ewma_ns),
 
-	TP_STRUCT__entry(
-		__field(int,		cpu)
-		__field(unsigned int,	floor_khz)
-		__field(unsigned int,	ttl_ms)
-		__field(unsigned long,	ewma_ns)
-	),
+        TP_STRUCT__entry(
+                __field(int,                cpu)
+                __field(unsigned int,        floor_khz)
+                __field(unsigned int,        ttl_ms)
+                __field(unsigned long,        ewma_ns)
+        ),
 
-	TP_fast_assign(
-		__entry->cpu		= cpu;
-		__entry->floor_khz	= floor_khz;
-		__entry->ttl_ms		= ttl_ms;
-		__entry->ewma_ns	= ewma_ns;
-	),
+        TP_fast_assign(
+                __entry->cpu                = cpu;
+                __entry->floor_khz        = floor_khz;
+                __entry->ttl_ms                = ttl_ms;
+                __entry->ewma_ns        = ewma_ns;
+        ),
 
-	TP_printk("cpu=%d floor=%ukHz ttl=%ums ewma=%luns",
-		  __entry->cpu, __entry->floor_khz,
-		  __entry->ttl_ms, __entry->ewma_ns)
+        TP_printk("cpu=%d floor=%ukHz ttl=%ums ewma=%luns",
+                  __entry->cpu, __entry->floor_khz,
+                  __entry->ttl_ms, __entry->ewma_ns)
 );
 
 /*
@@ -47,27 +47,27 @@ TRACE_EVENT(hikari_freq_hint,
  */
 TRACE_EVENT(hikari_placement,
 
-	TP_PROTO(int original, int selected, bool idle, bool is_big),
+        TP_PROTO(int original, int selected, bool idle, bool is_big),
 
-	TP_ARGS(original, selected, idle, is_big),
+        TP_ARGS(original, selected, idle, is_big),
 
-	TP_STRUCT__entry(
-		__field(int,	original)
-		__field(int,	selected)
-		__field(bool,	idle)
-		__field(bool,	is_big)
-	),
+        TP_STRUCT__entry(
+                __field(int,        original)
+                __field(int,        selected)
+                __field(bool,        idle)
+                __field(bool,        is_big)
+        ),
 
-	TP_fast_assign(
-		__entry->original	= original;
-		__entry->selected	= selected;
-		__entry->idle		= idle;
-		__entry->is_big		= is_big;
-	),
+        TP_fast_assign(
+                __entry->original        = original;
+                __entry->selected        = selected;
+                __entry->idle                = idle;
+                __entry->is_big                = is_big;
+        ),
 
-	TP_printk("orig=%d sel=%d idle=%d big=%d",
-		  __entry->original, __entry->selected,
-		  __entry->idle, __entry->is_big)
+        TP_printk("orig=%d sel=%d idle=%d big=%d",
+                  __entry->original, __entry->selected,
+                  __entry->idle, __entry->is_big)
 );
 
 /*
@@ -75,26 +75,26 @@ TRACE_EVENT(hikari_placement,
  */
 TRACE_EVENT(hikari_profile,
 
-	TP_PROTO(unsigned int profile, unsigned int floor_big,
-		 unsigned int floor_little),
+        TP_PROTO(unsigned int profile, unsigned int floor_big,
+                 unsigned int floor_little),
 
-	TP_ARGS(profile, floor_big, floor_little),
+        TP_ARGS(profile, floor_big, floor_little),
 
-	TP_STRUCT__entry(
-		__field(unsigned int,	profile)
-		__field(unsigned int,	floor_big)
-		__field(unsigned int,	floor_little)
-	),
+        TP_STRUCT__entry(
+                __field(unsigned int,        profile)
+                __field(unsigned int,        floor_big)
+                __field(unsigned int,        floor_little)
+        ),
 
-	TP_fast_assign(
-		__entry->profile	= profile;
-		__entry->floor_big	= floor_big;
-		__entry->floor_little	= floor_little;
-	),
+        TP_fast_assign(
+                __entry->profile        = profile;
+                __entry->floor_big        = floor_big;
+                __entry->floor_little        = floor_little;
+        ),
 
-	TP_printk("profile=%u floor_big=%u%% floor_little=%u%%",
-		  __entry->profile, __entry->floor_big,
-		  __entry->floor_little)
+        TP_printk("profile=%u floor_big=%u%% floor_little=%u%%",
+                  __entry->profile, __entry->floor_big,
+                  __entry->floor_little)
 );
 
 #endif /* _TRACE_HIKARI_H */
@@ -105,5 +105,3 @@ TRACE_EVENT(hikari_profile,
 #define TRACE_INCLUDE_PATH trace/events
 #define TRACE_INCLUDE_FILE hikari
 #include <trace/define_trace.h>
-#undef TRACE_INCLUDE_PATH
-#undef TRACE_INCLUDE_FILE
