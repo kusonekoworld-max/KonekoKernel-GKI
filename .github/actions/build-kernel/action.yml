@@ -196,6 +196,34 @@ runs:
         perl -0pi -e 's{(#include <trace/define_trace\.h>\n)#undef TRACE_INCLUDE_PATH\n#undef TRACE_INCLUDE_FILE\n}{$1}g' "$TRACE_H"
       done
 
+      # Because our trace headers intentionally leave TRACE_INCLUDE_PATH
+      # / TRACE_INCLUDE_FILE defined after their own internal
+      # (recursive, multi-stage) expansion, those macros stay set for
+      # the rest of the translation unit once CREATE_TRACE_POINTS
+      # processing of our header is done. If the same .c file later
+      # includes another trace header that #defines TRACE_INCLUDE_PATH
+      # without #undef'ing it first (e.g. vendor hook headers under
+      # trace/hooks/*.h), that collides as a macro-redefinition error
+      # under -Werror.
+      #
+      # The safe place to clean up is the .c file itself, right after
+      # the #include line for our trace header: that line is only
+      # processed once at the top level (unlike the header's own
+      # footer, which gets re-entered by nested recursion -- undef'ing
+      # there caused the earlier "file not found" bug). Insert the
+      # undef pair right after each #include <trace/events/*.h> line,
+      # idempotently.
+      for spec in "cpufreq_zenith.c:cpufreq_zenith.h" "hikari.c:hikari.h"; do
+        C_FILE="${spec%%:*}"
+        H_FILE="${spec##*:}"
+        C_PATH="$TARGET_DIR/kernel/sched/$C_FILE"
+        if [ -f "$C_PATH" ] && grep -q "#include <trace/events/$H_FILE>" "$C_PATH"; then
+          if ! grep -A2 "#include <trace/events/$H_FILE>" "$C_PATH" | grep -q "#undef TRACE_INCLUDE_PATH"; then
+            perl -0pi -e "s{(#include <trace/events/\Q$H_FILE\E>\n)}{\$1#undef TRACE_INCLUDE_PATH\n#undef TRACE_INCLUDE_FILE\n}" "$C_PATH"
+          fi
+        fi
+      done
+
       if ! grep -q "cpufreq_zenith.o" "$TARGET_DIR/kernel/sched/Makefile"; then
         echo 'obj-$(CONFIG_CPU_FREQ_GOV_ZENITH) += cpufreq_zenith.o' >> "$TARGET_DIR/kernel/sched/Makefile"
       fi
