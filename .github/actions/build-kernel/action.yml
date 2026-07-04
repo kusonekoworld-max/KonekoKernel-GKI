@@ -118,13 +118,6 @@ runs:
 
       ZENITH_C="$TARGET_DIR/kernel/sched/cpufreq_zenith.c"
 
-      # 5.15-based GKI trees predate upstream's uclamp_rq_get()/set()
-      # wrapper pair in kernel/sched/sched.h, so the direct call in
-      # zenith_uclamp_cache_refresh() fails with an implicit-declaration
-      # error. Inject a portable compat shim (same plain
-      # rq->uclamp[clamp_id].value read the real helper does) right
-      # after the includes, once, idempotently. Placement just needs
-      # to precede first use, not be adjacent to it.
       if ! grep -q "zenith_uclamp_rq_get" "$ZENITH_C"; then
         cat > /tmp/zenith_uclamp_shim.txt <<'EOF'
 
@@ -137,9 +130,9 @@ runs:
       #ifdef CONFIG_UCLAMP_TASK
       #ifndef uclamp_rq_get
       static inline unsigned long zenith_uclamp_rq_get(struct rq *rq,
-      						  enum uclamp_id clamp_id)
+                                                        enum uclamp_id clamp_id)
       {
-      	return READ_ONCE(rq->uclamp[clamp_id].value);
+              return READ_ONCE(rq->uclamp[clamp_id].value);
       }
       #define uclamp_rq_get(rq, clamp_id) zenith_uclamp_rq_get((rq), (clamp_id))
       #endif
@@ -156,29 +149,6 @@ runs:
       cp "${{ github.action_path }}/patches/zenith/trace_cpufreq_zenith.h" "$TARGET_DIR/include/trace/events/cpufreq_zenith.h"
       cp "${{ github.action_path }}/patches/zenith/trace_hikari.h" "$TARGET_DIR/include/trace/events/hikari.h"
 
-      # Both trace-event headers never set TRACE_INCLUDE_PATH/FILE
-      # themselves. An earlier trace/events/*.h included upstream in
-      # cpufreq_zenith.c (trace/events/power.h) sets TRACE_INCLUDE_PATH
-      # to trace/hooks internally and never #undef's it afterward, so
-      # these headers silently inherit the wrong path and
-      # define_trace.h resolves to trace/hooks/<name>.h instead of
-      # trace/events/<name>.h. Force-override right before each
-      # header's own define_trace.h include, idempotently.
-      #
-      # NOTE: we do NOT undef TRACE_INCLUDE_PATH/TRACE_INCLUDE_FILE
-      # again *after* the #include <trace/define_trace.h> line.
-      # define_trace.h re-includes this same header multiple times
-      # (once per processing stage) while CREATE_TRACE_POINTS is set,
-      # and all of those nested re-includes happen underneath this
-      # single #include line. A trailing #undef here fires on every
-      # nested pass too, so by the time the outer/first pass resumes
-      # and needs TRACE_INCLUDE_PATH/FILE for a later stage, they've
-      # already been undefined by an inner pass -- causing
-      # "'TRACE_INCLUDE_PATH/TRACE_INCLUDE_FILE.h' file not found".
-      # Leaving them defined after the include is safe: each header's
-      # own leading #undef (right before its #define) clears any
-      # stale value from a previously processed header before setting
-      # its own.
       ZENITH_TRACE_H="$TARGET_DIR/include/trace/events/cpufreq_zenith.h"
       HIKARI_TRACE_H="$TARGET_DIR/include/trace/events/hikari.h"
 
@@ -190,32 +160,10 @@ runs:
         perl -0pi -e 's{(#include <trace/define_trace\.h>)}{#undef TRACE_INCLUDE_PATH\n#undef TRACE_INCLUDE_FILE\n#define TRACE_INCLUDE_PATH trace/events\n#define TRACE_INCLUDE_FILE hikari\n$1}' "$HIKARI_TRACE_H"
       fi
 
-      # Defensive cleanup: strip any *trailing* TRACE_INCLUDE_PATH/FILE
-      # undef pair that appears right after the header's own
-      # #include <trace/define_trace.h> line (the root cause of the
-      # "file not found" build error described above). Safe/no-op if
-      # the pair isn't present.
       for TRACE_H in "$ZENITH_TRACE_H" "$HIKARI_TRACE_H"; do
         perl -0pi -e 's{(#include <trace/define_trace\.h>\n)#undef TRACE_INCLUDE_PATH\n#undef TRACE_INCLUDE_FILE\n}{$1}g' "$TRACE_H"
       done
 
-      # Because our trace headers intentionally leave TRACE_INCLUDE_PATH
-      # / TRACE_INCLUDE_FILE defined after their own internal
-      # (recursive, multi-stage) expansion, those macros stay set for
-      # the rest of the translation unit once CREATE_TRACE_POINTS
-      # processing of our header is done. If the same .c file later
-      # includes another trace header that #defines TRACE_INCLUDE_PATH
-      # without #undef'ing it first (e.g. vendor hook headers under
-      # trace/hooks/*.h), that collides as a macro-redefinition error
-      # under -Werror.
-      #
-      # The safe place to clean up is the .c file itself, right after
-      # the #include line for our trace header: that line is only
-      # processed once at the top level (unlike the header's own
-      # footer, which gets re-entered by nested recursion -- undef'ing
-      # there caused the earlier "file not found" bug). Insert the
-      # undef pair right after each #include <trace/events/*.h> line,
-      # idempotently.
       for spec in "cpufreq_zenith.c:cpufreq_zenith.h" "hikari.c:hikari.h"; do
         C_FILE="${spec%%:*}"
         H_FILE="${spec##*:}"
@@ -244,13 +192,6 @@ runs:
         printf "\t  designed for optimized performance and energy awareness.\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
       fi
 
-      # hikari.c compiles its real hikari_enabled()/hikari_uclamp_*()
-      # definitions unconditionally, but include/linux/hikari.h only
-      # exposes those declarations (instead of its stub inlines) when
-      # CONFIG_HIKARI is set. Nothing previously defined that symbol,
-      # so the header fell back to its stubs and collided with the
-      # real definitions at link/compile time. Define it here, tied
-      # to the governor that actually gates hikari.o in the Makefile.
       if ! grep -q "config HIKARI" "$TARGET_DIR/drivers/cpufreq/Kconfig"; then
         printf "\nconfig HIKARI\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
         printf "\tbool \"Hikari wake-time policy engine\"\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
@@ -261,11 +202,6 @@ runs:
         printf "\t  the 'zenith' cpufreq governor.\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
       fi
 
-      # Gates hikari_uclamp_boost_amount() / hikari_apply_uclamp_boost():
-      # the per-task uclamp_min wake-time boost actuator. Without this,
-      # IS_ENABLED(CONFIG_HIKARI_UCLAMP) is always false and the boost
-      # path silently compiles out even though hikari_boost_until_ns
-      # and the uclamp_ttl_ms/uclamp_max_pct sysctls are present.
       if ! grep -q "config HIKARI_UCLAMP" "$TARGET_DIR/drivers/cpufreq/Kconfig"; then
         printf "\nconfig HIKARI_UCLAMP\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
         printf "\tbool \"Hikari uclamp_min wake-time boost\"\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
@@ -289,7 +225,7 @@ runs:
         fi
       fi
 
-    - name: 'Fix schedutil_cpu_util Linkage for Zenith'
+  - name: 'Fix schedutil_cpu_util Linkage for Zenith'
     shell: bash
     run: |
       set -euo pipefail
@@ -299,7 +235,6 @@ runs:
       echo "Ensuring Schedutil is built-in for Zenith compatibility..."
 
       if [ -f "$DEFCONFIG_GKI" ]; then
-        # Force set to =y. This handles cases where it might be =m or missing entirely.
         if grep -q '^CONFIG_CPU_FREQ_GOV_SCHEDUTIL' "$DEFCONFIG_GKI"; then
           sed -i 's/^CONFIG_CPU_FREQ_GOV_SCHEDUTIL.*/CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y/' "$DEFCONFIG_GKI"
         else
@@ -310,7 +245,6 @@ runs:
         echo "::error::gki_defconfig not found at $DEFCONFIG_GKI"
         exit 1
       fi
-
 
   - name: 'Inject Hikari Flags'
     shell: bash
