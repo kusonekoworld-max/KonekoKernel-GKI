@@ -1,4 +1,3 @@
-
 name: 'Build Kernel'
 description: 'Builds kernel using legacy build.sh or Bazel (kleaf)'
 inputs:
@@ -101,34 +100,49 @@ runs:
         fi
       fi
 
-  - name: 'Inject Zenith Governor'
+  - name: 'Inject Zenith & Hikari Governor'
     shell: bash
     run: |
       set -euo pipefail
       TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
 
-      # Membuat direktori tujuan di source kernel jika belum ada
+      # 1. Membuat seluruh direktori tujuan di dalam source kernel tree
       mkdir -p "$TARGET_DIR/kernel/sched"
       mkdir -p "$TARGET_DIR/include/linux"
+      mkdir -p "$TARGET_DIR/include/trace/events"
 
-      # Menyalin source file (.c) dan header file (.h) dari folder patch repo
+      # 2. Menyalin file dari folder patches/zenith/
       cp "${{ github.action_path }}/patches/zenith/cpufreq_zenith.c" "$TARGET_DIR/kernel/sched/cpufreq_zenith.c"
-      cp "${{ github.action_path }}/patches/zenith/cpufreq_zenith.h" "$TARGET_DIR/include/linux/cpufreq_zenith.h"
+      cp "${{ github.action_path }}/patches/zenith/hikari.c" "$TARGET_DIR/kernel/sched/hikari.c"
 
+      cp "${{ github.action_path }}/patches/zenith/cpufreq_zenith.h" "$TARGET_DIR/include/linux/cpufreq_zenith.h"
+      cp "${{ github.action_path }}/patches/zenith/hikari.h" "$TARGET_DIR/include/linux/hikari.h"
+      cp "${{ github.action_path }}/patches/zenith/zenith_profiles.h" "$TARGET_DIR/include/linux/zenith_profiles.h"
+
+      # 3. Menyalin tracepoint header dan mengembalikan ke nama asli sistem kernel
+      cp "${{ github.action_path }}/patches/zenith/trace_cpufreq_zenith.h" "$TARGET_DIR/include/trace/events/cpufreq_zenith.h"
+      cp "${{ github.action_path }}/patches/zenith/trace_hikari.h" "$TARGET_DIR/include/trace/events/hikari.h"
+
+      # 4. Mendaftarkan objek kompilasi ke kernel/sched/Makefile
       if ! grep -q "cpufreq_zenith.o" "$TARGET_DIR/kernel/sched/Makefile"; then
         echo 'obj-$(CONFIG_CPU_FREQ_GOV_ZENITH) += cpufreq_zenith.o' >> "$TARGET_DIR/kernel/sched/Makefile"
       fi
+      if ! grep -q "hikari.o" "$TARGET_DIR/kernel/sched/Makefile"; then
+        echo 'obj-$(CONFIG_CPU_FREQ_GOV_ZENITH) += hikari.o' >> "$TARGET_DIR/kernel/sched/Makefile"
+      fi
 
+      # 5. Menambahkan konfigurasi Kconfig untuk menu kernel kustom
       if ! grep -q "config CPU_FREQ_GOV_ZENITH" "$TARGET_DIR/drivers/cpufreq/Kconfig"; then
         printf "\nconfig CPU_FREQ_GOV_ZENITH\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
-        printf "\ttristate \"'zenith' cpufreq governor\"\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+        printf "\ttristate \"'zenith' and 'hikari' cpufreq governor\"\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
         printf "\tdepends on CPU_FREQ && SMP\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
         printf "\tselect CPU_FREQ_GOV_ATTR_SET\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
         printf "\thelp\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
-        printf "\t  'zenith' is an advanced custom CPU frequency governor (Zenithed-V4)\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+        printf "\t  'zenith' and 'hikari' are advanced custom CPU frequency governors\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
         printf "\t  designed for optimized performance and energy awareness.\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
       fi
 
+      # 6. Mengaktifkan secara otomatis di defconfig GKI
       DEFCONFIG_GKI="$TARGET_DIR/arch/arm64/configs/gki_defconfig"
       if [ -f "$DEFCONFIG_GKI" ]; then
         if ! grep -q "CONFIG_CPU_FREQ_GOV_ZENITH" "$DEFCONFIG_GKI"; then
