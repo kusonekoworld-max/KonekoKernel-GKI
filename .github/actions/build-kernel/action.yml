@@ -209,6 +209,26 @@ runs:
         echo "hikari_boost_until_ns already present"
       fi
 
+      echo "Checking for hikari_last_enqueue_ns in sched.h"
+      if ! grep -q "hikari_last_enqueue_ns;" "$SCHED_H"; then
+        echo "Injecting hikari_last_enqueue_ns"
+        sed -i '/struct thread_struct[[:space:]]*thread;/a \
+        \tu32 hikari_last_enqueue_ns;' "$SCHED_H"
+        echo "Injection successful"
+      else
+        echo "hikari_last_enqueue_ns already present"
+      fi
+
+      echo "Checking for hikari_wait_ewma_ns in sched.h"
+      if ! grep -q "hikari_wait_ewma_ns;" "$SCHED_H"; then
+        echo "Injecting hikari_wait_ewma_ns"
+        sed -i '/struct thread_struct[[:space:]]*thread;/a \
+        \tu32 hikari_wait_ewma_ns;' "$SCHED_H"
+        echo "Injection successful"
+      else
+        echo "hikari_wait_ewma_ns already present"
+      fi
+
   - name: 'Build Kernel'
     shell: bash
     working-directory: ${{ github.workspace }}/kernel
