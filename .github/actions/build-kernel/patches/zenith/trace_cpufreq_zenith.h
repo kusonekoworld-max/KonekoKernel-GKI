@@ -460,4 +460,8 @@ TRACE_EVENT(zenith_input_boost,
 #endif /* _TRACE_CPUFREQ_ZENITH_H */
 
 /* This part must be outside protection */
+#undef TRACE_INCLUDE_PATH
+#undef TRACE_INCLUDE_FILE
+#define TRACE_INCLUDE_PATH trace/events
+#define TRACE_INCLUDE_FILE cpufreq_zenith
 #include <trace/define_trace.h>
