@@ -113,6 +113,8 @@ runs:
       cp "${{ github.action_path }}/patches/zenith/cpufreq_zenith.c" "$TARGET_DIR/kernel/sched/cpufreq_zenith.c"
       cp "${{ github.action_path }}/patches/zenith/hikari.c" "$TARGET_DIR/kernel/sched/hikari.c"
 
+      ZENITH_C="$TARGET_DIR/kernel/sched/cpufreq_zenith.c"
+
       # 5.15-based GKI trees predate upstream's uclamp_rq_get()/set()
       # wrapper pair in kernel/sched/sched.h, so the direct call in
       # zenith_uclamp_cache_refresh() fails with an implicit-declaration
@@ -120,7 +122,6 @@ runs:
       # rq->uclamp[clamp_id].value read the real helper does) right
       # after the includes, once, idempotently. Placement just needs
       # to precede first use, not be adjacent to it.
-      ZENITH_C="$TARGET_DIR/kernel/sched/cpufreq_zenith.c"
       if ! grep -q "zenith_uclamp_rq_get" "$ZENITH_C"; then
         cat > /tmp/zenith_uclamp_shim.txt <<'EOF'
 
@@ -151,6 +152,25 @@ runs:
 
       cp "${{ github.action_path }}/patches/zenith/trace_cpufreq_zenith.h" "$TARGET_DIR/include/trace/events/cpufreq_zenith.h"
       cp "${{ github.action_path }}/patches/zenith/trace_hikari.h" "$TARGET_DIR/include/trace/events/hikari.h"
+
+      # Both trace-event headers never set TRACE_INCLUDE_PATH/FILE
+      # themselves. An earlier trace/events/*.h included upstream in
+      # cpufreq_zenith.c (trace/events/power.h) sets TRACE_INCLUDE_PATH
+      # to trace/hooks internally and never #undef's it afterward, so
+      # these headers silently inherit the wrong path and
+      # define_trace.h resolves to trace/hooks/<name>.h instead of
+      # trace/events/<name>.h. Force-override right before each
+      # header's own define_trace.h include, idempotently.
+      ZENITH_TRACE_H="$TARGET_DIR/include/trace/events/cpufreq_zenith.h"
+      HIKARI_TRACE_H="$TARGET_DIR/include/trace/events/hikari.h"
+
+      if ! grep -q "TRACE_INCLUDE_PATH trace/events" "$ZENITH_TRACE_H"; then
+        perl -0pi -e 's{(#include <trace/define_trace\.h>)}{#undef TRACE_INCLUDE_PATH\n#undef TRACE_INCLUDE_FILE\n#define TRACE_INCLUDE_PATH trace/events\n#define TRACE_INCLUDE_FILE cpufreq_zenith\n$1}' "$ZENITH_TRACE_H"
+      fi
+
+      if ! grep -q "TRACE_INCLUDE_PATH trace/events" "$HIKARI_TRACE_H"; then
+        perl -0pi -e 's{(#include <trace/define_trace\.h>)}{#undef TRACE_INCLUDE_PATH\n#undef TRACE_INCLUDE_FILE\n#define TRACE_INCLUDE_PATH trace/events\n#define TRACE_INCLUDE_FILE hikari\n$1}' "$HIKARI_TRACE_H"
+      fi
 
       if ! grep -q "cpufreq_zenith.o" "$TARGET_DIR/kernel/sched/Makefile"; then
         echo 'obj-$(CONFIG_CPU_FREQ_GOV_ZENITH) += cpufreq_zenith.o' >> "$TARGET_DIR/kernel/sched/Makefile"
