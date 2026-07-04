@@ -70,6 +70,7 @@
 #include <linux/time.h>
 #include <linux/kernel_stat.h>
 #include <linux/thermal.h>
+#include <trace/hooks/cpufreq.h>
 
 /* linux/fb.h transitively pulls linux/acpi.h, which redefines the
  * ACPI_PROBE_TABLE macro already defined by sched.h ->
