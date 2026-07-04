@@ -113,6 +113,37 @@ runs:
       cp "${{ github.action_path }}/patches/zenith/cpufreq_zenith.c" "$TARGET_DIR/kernel/sched/cpufreq_zenith.c"
       cp "${{ github.action_path }}/patches/zenith/hikari.c" "$TARGET_DIR/kernel/sched/hikari.c"
 
+      # 5.15-based GKI trees predate upstream's uclamp_rq_get()/set()
+      # wrapper pair in kernel/sched/sched.h, so the direct call in
+      # zenith_uclamp_cache_refresh() fails with an implicit-declaration
+      # error. Inject a portable compat shim (same plain
+      # rq->uclamp[clamp_id].value read the real helper does) right
+      # after the includes, once, idempotently. Placement just needs
+      # to precede first use, not be adjacent to it.
+      ZENITH_C="$TARGET_DIR/kernel/sched/cpufreq_zenith.c"
+      if ! grep -q "zenith_uclamp_rq_get" "$ZENITH_C"; then
+        cat > /tmp/zenith_uclamp_shim.txt <<'EOF'
+
+/*
+ * Compat shim: this base kernel tree (5.15) predates upstream's
+ * uclamp_rq_get()/uclamp_rq_set() wrapper pair in kernel/sched/sched.h.
+ * Falls back to the same plain field read the real helper does, so
+ * behavior is identical either way.
+ */
+#ifdef CONFIG_UCLAMP_TASK
+#ifndef uclamp_rq_get
+static inline unsigned long zenith_uclamp_rq_get(struct rq *rq,
+						  enum uclamp_id clamp_id)
+{
+	return READ_ONCE(rq->uclamp[clamp_id].value);
+}
+#define uclamp_rq_get(rq, clamp_id) zenith_uclamp_rq_get((rq), (clamp_id))
+#endif
+#endif
+EOF
+        sed -i '/^#include <linux\/hikari\.h>/r /tmp/zenith_uclamp_shim.txt' "$ZENITH_C"
+      fi
+
       cp "${{ github.action_path }}/patches/zenith/cpufreq_zenith.h" "$TARGET_DIR/include/linux/cpufreq_zenith.h"
       cp "${{ github.action_path }}/patches/zenith/hikari.h" "$TARGET_DIR/include/linux/hikari.h"
       cp "${{ github.action_path }}/patches/zenith/zenith_profiles.h" "$TARGET_DIR/include/linux/zenith_profiles.h"
