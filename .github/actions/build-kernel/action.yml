@@ -105,19 +105,27 @@ runs:
     run: |
       set -euo pipefail
       TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
-      cp "${{ github.action_path }}/patches/zenith/cpufreq_zenith.c" "$TARGET_DIR/kernel/sched/cpufreq_zenith.c"
-      cp "${{ github.action_path }}/patches/zenith/hikari.c" "$TARGET_DIR/kernel/sched/hikari.c"
-      sed -i '/unsigned long schedutil_cpu_util(/d' "$TARGET_DIR/kernel/sched/cpufreq_zenith.c"
-      sed -i 's/schedutil_cpu_util/effective_cpu_util/g' "$TARGET_DIR/kernel/sched/cpufreq_zenith.c"
+      
+      # 1. Buat semua direktori tujuan terlebih dahulu
       mkdir -p "$TARGET_DIR/kernel/sched"
       mkdir -p "$TARGET_DIR/include/linux"
       mkdir -p "$TARGET_DIR/include/trace/events"
 
+      # 2. Salin seluruh berkas mentah di awal agar tidak menimpa hasil modifikasi di bawah
       cp "${{ github.action_path }}/patches/zenith/cpufreq_zenith.c" "$TARGET_DIR/kernel/sched/cpufreq_zenith.c"
       cp "${{ github.action_path }}/patches/zenith/hikari.c" "$TARGET_DIR/kernel/sched/hikari.c"
+      cp "${{ github.action_path }}/patches/zenith/cpufreq_zenith.h" "$TARGET_DIR/include/linux/cpufreq_zenith.h"
+      cp "${{ github.action_path }}/patches/zenith/hikari.h" "$TARGET_DIR/include/linux/hikari.h"
+      cp "${{ github.action_path }}/patches/zenith/zenith_profiles.h" "$TARGET_DIR/include/linux/zenith_profiles.h"
+      cp "${{ github.action_path }}/patches/zenith/trace_cpufreq_zenith.h" "$TARGET_DIR/include/trace/events/cpufreq_zenith.h"
+      cp "${{ github.action_path }}/patches/zenith/trace_hikari.h" "$TARGET_DIR/include/trace/events/hikari.h"
 
+      # 3. Lakukan modifikasi sed untuk mengalihkan ke fungsi global effective_cpu_util
       ZENITH_C="$TARGET_DIR/kernel/sched/cpufreq_zenith.c"
+      sed -i '/unsigned long schedutil_cpu_util(/d' "$ZENITH_C"
+      sed -i 's/schedutil_cpu_util/effective_cpu_util/g' "$ZENITH_C"
 
+      # 4. Suntikkan portable compat shim untuk uclamp jika basis kernel berumur lama (5.15)
       if ! grep -q "zenith_uclamp_rq_get" "$ZENITH_C"; then
         cat > /tmp/zenith_uclamp_shim.txt <<'EOF'
 
@@ -142,13 +150,7 @@ runs:
         sed -i '/^#include <linux\/hikari\.h>/r /tmp/zenith_uclamp_shim.txt' "$ZENITH_C"
       fi
 
-      cp "${{ github.action_path }}/patches/zenith/cpufreq_zenith.h" "$TARGET_DIR/include/linux/cpufreq_zenith.h"
-      cp "${{ github.action_path }}/patches/zenith/hikari.h" "$TARGET_DIR/include/linux/hikari.h"
-      cp "${{ github.action_path }}/patches/zenith/zenith_profiles.h" "$TARGET_DIR/include/linux/zenith_profiles.h"
-
-      cp "${{ github.action_path }}/patches/zenith/trace_cpufreq_zenith.h" "$TARGET_DIR/include/trace/events/cpufreq_zenith.h"
-      cp "${{ github.action_path }}/patches/zenith/trace_hikari.h" "$TARGET_DIR/include/trace/events/hikari.h"
-
+      # 5. Penyesuaian Tracepoint Header
       ZENITH_TRACE_H="$TARGET_DIR/include/trace/events/cpufreq_zenith.h"
       HIKARI_TRACE_H="$TARGET_DIR/include/trace/events/hikari.h"
 
@@ -175,6 +177,7 @@ runs:
         fi
       done
 
+      # 6. Registrasi ke Makefile dan Kconfig
       if ! grep -q "cpufreq_zenith.o" "$TARGET_DIR/kernel/sched/Makefile"; then
         echo 'obj-$(CONFIG_CPU_FREQ_GOV_ZENITH) += cpufreq_zenith.o' >> "$TARGET_DIR/kernel/sched/Makefile"
       fi
