@@ -236,26 +236,53 @@ runs:
         fi
       done
 
-  - name: 'Install Clang 22'
+  - name: 'Inject Dynamic Fsync'
     shell: bash
     run: |
       set -euo pipefail
-      wget https://apt.llvm.org/llvm.sh
-      chmod +x llvm.sh
-      sudo ./llvm.sh 22
-      # llvm.sh installs version-suffixed binaries (clang-22, ld.lld-22,
-      # etc). Symlink them to unversioned names so the existing
-      # CC/CXX/LD invocations in the "Build Kernel" step below don't
-      # need to change.
-      sudo ln -sf /usr/bin/clang-22 /usr/bin/clang
-      sudo ln -sf /usr/bin/clang++-22 /usr/bin/clang++
-      sudo ln -sf /usr/bin/ld.lld-22 /usr/bin/ld.lld
-      sudo ln -sf /usr/bin/llvm-ar-22 /usr/bin/llvm-ar
-      sudo ln -sf /usr/bin/llvm-nm-22 /usr/bin/llvm-nm
-      sudo ln -sf /usr/bin/llvm-objcopy-22 /usr/bin/llvm-objcopy
-      sudo ln -sf /usr/bin/llvm-strip-22 /usr/bin/llvm-strip
-      clang --version
-      ld.lld --version
+      TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
+
+      # Header
+      mkdir -p "$TARGET_DIR/include/linux"
+      cp "${{ github.action_path }}/patches/dynamic_fsync/dynamic_fsync.h" \
+         "$TARGET_DIR/include/linux/dynamic_fsync.h"
+
+      # sync.c -- full file replace. This file is not touched by any
+      # other step in this pipeline, so a straight copy is safe (no
+      # anchor-based perl patching needed like fair.c/vorpal.c above).
+      cp "${{ github.action_path }}/patches/dynamic_fsync/sync.c" \
+         "$TARGET_DIR/fs/sync.c"
+
+      # Standalone driver module (backlight-notifier based screen-state
+      # detection -- writes dynamic_fsync_state, which fs/sync.c reads).
+      mkdir -p "$TARGET_DIR/drivers/dynamic_fsync"
+      cp "${{ github.action_path }}/patches/dynamic_fsync/dynamic_fsync_driver.c" \
+         "$TARGET_DIR/drivers/dynamic_fsync/dynamic_fsync_driver.c"
+      cp "${{ github.action_path }}/patches/dynamic_fsync/Makefile" \
+         "$TARGET_DIR/drivers/dynamic_fsync/Makefile"
+      if ! grep -q "dynamic_fsync/" "$TARGET_DIR/drivers/Makefile"; then
+        echo "obj-y += dynamic_fsync/" >> "$TARGET_DIR/drivers/Makefile"
+      fi
+
+      # Defconfig fix: CONFIG_DYNAMIC_FSYNC must be y, otherwise
+      # dynamic_fsync_state/dynamic_fsync_enabled are never defined in
+      # sync.c (they're guarded by #ifdef CONFIG_DYNAMIC_FSYNC there),
+      # and the driver module above will fail to link against them.
+      DEFCONFIG_GKI="$TARGET_DIR/arch/arm64/configs/gki_defconfig"
+      if [ -f "$DEFCONFIG_GKI" ] && ! grep -q "CONFIG_DYNAMIC_FSYNC" "$DEFCONFIG_GKI"; then
+        echo "CONFIG_DYNAMIC_FSYNC=y" >> "$DEFCONFIG_GKI"
+      fi
+
+      # Sanity check: fail loudly here instead of deep in the compile
+      # log if the copy silently didn't land where expected.
+      if ! grep -q "dynamic_fsync_should_skip" "$TARGET_DIR/fs/sync.c"; then
+        echo "ERROR: dynamic_fsync hook missing from fs/sync.c after copy" >&2
+        exit 1
+      fi
+      if ! grep -q "CONFIG_DYNAMIC_FSYNC" "$DEFCONFIG_GKI" 2>/dev/null; then
+        echo "ERROR: CONFIG_DYNAMIC_FSYNC missing from gki_defconfig after patch" >&2
+        exit 1
+      fi
 
   - name: 'Build Kernel'
     shell: bash
@@ -274,9 +301,9 @@ runs:
         BUILD_CONFIG=common/build.config.gki.aarch64 \
         build/build.sh -j"$(nproc)" \
         CC="/usr/bin/ccache clang" \
-        CXX="/usr/bin/ccache clang++" \
+        CXX="/usr/bin/ccache clang+" \
         HOSTCC="/usr/bin/ccache clang" \
-        HOSTCXX="/usr/bin/ccache clang++" \
+        HOSTCXX="/usr/bin/ccache clang+" \
         LD="${{ github.workspace }}/kernel/common/ld-wrapper" \
         HOSTLD="${{ github.workspace }}/kernel/common/ld-wrapper"
       else
