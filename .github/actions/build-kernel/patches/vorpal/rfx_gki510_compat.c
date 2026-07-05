@@ -16,11 +16,12 @@
  * rfx_get_util() and never touches sched_gaming_active at all), so
  * vorpal.o would fail to link with "undefined reference" otherwise.
  *
- * This file defines and exports all three, reusing exactly the same
- * sched APIs reflex's own rfx_get_util() already uses successfully on
- * this 5.15 tree (schedutil_cpu_util / cpu_util_cfs / cpu_bw_dl /
- * arch_scale_cpu_capacity), so there is no new/unverified kernel API
- * surface here.
+ * This file defines and exports all three. NOTE: despite the tree
+ * claiming a 5.15 base, schedutil_cpu_util() is not actually declared
+ * here -- only the simpler public wrapper sched_cpu_util(cpu, max) is
+ * available (confirmed via build failure + compiler suggestion), so
+ * this uses that instead of the assumption in the original comment.
+ * cpu_bw_dl() / arch_scale_cpu_capacity() are unaffected.
  *
  * Lives in kernel/sched/ (not drivers/cpufreq/) because it needs the
  * internal kernel/sched/sched.h declarations (struct rq, cpu_rq(),
@@ -50,12 +51,18 @@ void rfx_get_util_gki510(int cpu, unsigned long boost,
 {
 	struct rq *rq = cpu_rq(cpu);
 	unsigned long max_cap = arch_scale_cpu_capacity(cpu);
-	unsigned long raw_util = cpu_util_cfs(rq);
 	unsigned long u;
 
 	*bwmin = cpu_bw_dl(rq);
 
-	u = schedutil_cpu_util(cpu, raw_util, max_cap, FREQUENCY_UTIL, NULL);
+	/*
+	 * This tree does not declare schedutil_cpu_util() (cpu, util_cfs,
+	 * max, type, sg_cpu) despite claiming a 5.15 base -- it exposes the
+	 * simpler public wrapper sched_cpu_util(cpu, max) instead, which
+	 * derives cfs util internally. No separate cpu_util_cfs()/raw_util
+	 * or FREQUENCY_UTIL enum needed here anymore.
+	 */
+	u = sched_cpu_util(cpu, max_cap);
 	u = max(u, boost);
 	if (u > max_cap)
 		u = max_cap;
