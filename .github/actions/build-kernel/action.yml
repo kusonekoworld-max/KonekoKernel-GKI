@@ -247,11 +247,39 @@ runs:
       cp "${{ github.action_path }}/patches/dynamic_fsync/dynamic_fsync.h" \
          "$TARGET_DIR/include/linux/dynamic_fsync.h"
 
-      # sync.c -- full file replace. This file is not touched by any
-      # other step in this pipeline, so a straight copy is safe (no
-      # anchor-based perl patching needed like fair.c/vorpal.c above).
-      cp "${{ github.action_path }}/patches/dynamic_fsync/sync.c" \
-         "$TARGET_DIR/fs/sync.c"
+      # fs/sync.c -- anchor-based patch instead of a full-file replace.
+      # A full-file replace previously shipped a copy pinned to one
+      # kernel branch's internal VFS API (__sync_blockdev, iterate_bdevs),
+      # which breaks the moment this pipeline builds a different branch
+      # where those got renamed/removed upstream (exactly what happened:
+      # __sync_blockdev -> sync_blockdev). Patching only the two spots
+      # we actually need leaves sync_filesystem()/ksys_sync()/
+      # do_sync_work() exactly as shipped by whatever tree we're
+      # building, so VFS-internal API drift across branches can't touch
+      # this patch at all.
+      SYNC_C="$TARGET_DIR/fs/sync.c"
+
+      # 1) Storage + extern hookup, right after the local includes.
+      if ! grep -q "dynamic_fsync_state __read_mostly;" "$SYNC_C"; then
+        perl -0pi -e 's{(#include "internal\.h"\n)}{$1\n#ifdef CONFIG_DYNAMIC_FSYNC\n#include <linux/dynamic_fsync.h>\nint dynamic_fsync_state __read_mostly;\nbool dynamic_fsync_enabled __read_mostly = true;\nEXPORT_SYMBOL_GPL(dynamic_fsync_state);\nEXPORT_SYMBOL_GPL(dynamic_fsync_enabled);\n#endif\n}' "$SYNC_C"
+      fi
+
+      # 2) Skip hook inside do_fsync(). Anchor is upstream's stock
+      # do_fsync() body, unchanged across 5.15-6.12 mainline/GKI --
+      # fdget() is deferred so a skip never takes an fd reference,
+      # avoiding a fdget()/fdput() asymmetry.
+      if ! grep -q "dynamic_fsync_should_skip" "$SYNC_C"; then
+        perl -0pi -e 's{static int do_fsync\(unsigned int fd, int datasync\)\n\{\n\tstruct fd f = fdget\(fd\);\n\tint ret = -EBADF;\n\n(\tif \(f\.file\) \{)}{static int do_fsync(unsigned int fd, int datasync)\n\{\n\tstruct fd f;\n\tint ret = -EBADF;\n\n\t\/*\n\t * Dynamic fsync: skip the writeback entirely while the screen is\n\t * on and the feature is enabled -- avoid taking the fd reference\n\t * in that case, so there is no fdget()\/fdput() asymmetry.\n\t *\/\n\tif (dynamic_fsync_should_skip())\n\t\treturn 0;\n\n\tf = fdget(fd);\n$1}' "$SYNC_C"
+      fi
+
+      if ! grep -q "dynamic_fsync_state __read_mostly;" "$SYNC_C"; then
+        echo "ERROR: failed to inject dynamic_fsync storage into fs/sync.c (anchor did not match -- source drifted)" >&2
+        exit 1
+      fi
+      if ! grep -q "dynamic_fsync_should_skip" "$SYNC_C"; then
+        echo "ERROR: failed to inject dynamic_fsync hook into fs/sync.c (anchor did not match -- source drifted)" >&2
+        exit 1
+      fi
 
       # Standalone driver module (polling-based screen-state detection,
       # same DPMS-then-backlight probing approach as MomenToMoiX --
@@ -299,10 +327,6 @@ runs:
 
       # Sanity check: fail loudly here instead of deep in the compile
       # log if the copy silently didn't land where expected.
-      if ! grep -q "dynamic_fsync_should_skip" "$TARGET_DIR/fs/sync.c"; then
-        echo "ERROR: dynamic_fsync hook missing from fs/sync.c after copy" >&2
-        exit 1
-      fi
       if ! grep -q "CONFIG_DYNAMIC_FSYNC" "$DEFCONFIG_GKI" 2>/dev/null; then
         echo "ERROR: CONFIG_DYNAMIC_FSYNC missing from gki_defconfig after patch" >&2
         exit 1
@@ -377,6 +401,7 @@ runs:
         exit 0
       fi
       exit 1
+
   - name: 'Patch AnyKernel3 for Bypass Hack'
     shell: bash
     if: ${{ inputs.bypass == 'true' }}
@@ -385,6 +410,3 @@ runs:
       set -euo pipefail
       cp ${{ github.action_path }}/patches/bypass.patch "${{ github.workspace }}/AnyKernel3/bypass.patch"
       patch -p1 < bypass.patch
-
-
-  
