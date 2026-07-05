@@ -49,14 +49,30 @@ static int wake_boost_ms = 1200;
 module_param(wake_boost_ms, int, 0644);
 MODULE_PARM_DESC(wake_boost_ms, "Duration (ms) the wake boost floor is held before reverting to normal scaling.");
 
-#define DPMS_PATH           "/sys/class/drm/card0-DSI-1/dpms"
-#define BACKLIGHT_PATH      "/sys/class/backlight/panel0-backlight/brightness"
 #define THERMAL_ZONE_MAX    15
 
 #define CPUSET_SYSBG_PATH   "/dev/cpuset/system-background/cpus"
 #define CPUSET_BG_PATH      "/dev/cpuset/background/cpus"
 
 #define IOSCHED_TARGET       "none"
+
+/* Display-state detection is not standardized across vendors: some expose
+ * DRM DPMS state, others only a raw backlight/LED brightness node under
+ * different class paths. We probe a candidate list once at boot instead
+ * of hardcoding a single path, so the same driver binary works across
+ * more devices without a rebuild. */
+static const char *dpms_candidates[] = {
+    "/sys/class/drm/card0-DSI-1/dpms",
+    "/sys/class/drm/card1-DSI-1/dpms",
+    NULL,
+};
+
+static const char *backlight_candidates[] = {
+    "/sys/class/backlight/panel0-backlight/brightness",
+    "/sys/class/leds/lcd-backlight/brightness",
+    "/sys/class/backlight/panel0/brightness",
+    NULL,
+};
 
 static const char *iosched_candidates[] = {
     "/sys/block/sda/queue/scheduler",
@@ -86,6 +102,11 @@ static unsigned long thermal_hold_expire = 0;
 static int last_temp_mc = -273000;
 static char power_status_path[64] = "";
 static bool power_status_available = false;
+
+static char dpms_path[64] = "";
+static bool dpms_available = false;
+static char backlight_path[64] = "";
+static bool backlight_available = false;
 
 static char iosched_path[64] = "";
 static char default_iosched[32] = "none";
@@ -155,6 +176,36 @@ static bool momx_is_charging(void) {
     if (!power_status_available || momx_read_file(power_status_path, buf, sizeof(buf)) <= 0)
         return false;
     return strstr(buf, "Charging") != NULL || strstr(buf, "Full") != NULL;
+}
+
+static void momx_display_node_detect(void) {
+    char buf[32];
+    int i;
+
+    for (i = 0; dpms_candidates[i] != NULL; i++) {
+        if (momx_read_file(dpms_candidates[i], buf, sizeof(buf)) > 0) {
+            strscpy(dpms_path, dpms_candidates[i], sizeof(dpms_path));
+            dpms_available = true;
+            pr_info("DPMS node detected at: %s\n", dpms_path);
+            break;
+        }
+    }
+    if (!dpms_available)
+        pr_warn("No DPMS node detected from candidates, will rely on backlight fallback.\n");
+
+    for (i = 0; backlight_candidates[i] != NULL; i++) {
+        if (momx_read_file(backlight_candidates[i], buf, sizeof(buf)) > 0) {
+            strscpy(backlight_path, backlight_candidates[i], sizeof(backlight_path));
+            backlight_available = true;
+            pr_info("Backlight node detected at: %s\n", backlight_path);
+            break;
+        }
+    }
+    if (!backlight_available)
+        pr_warn("No backlight brightness node detected from candidates.\n");
+
+    if (!dpms_available && !backlight_available)
+        pr_err("No usable display-state node found — screen on/off detection will not work!\n");
 }
 
 static void momx_cpuset_restrict(void) {
@@ -431,6 +482,7 @@ static int momx_watcher(void *data) {
     momx_qos_init();
     momx_charge_detect();
     momx_iosched_detect();
+    momx_display_node_detect();
 
     pr_info("Watcher core loop active (Sysfs Polling mode).\n");
 
@@ -455,10 +507,10 @@ static int momx_watcher(void *data) {
             force_resync = false;
         }
 
-        if (momx_read_file(DPMS_PATH, buf, sizeof(buf)) > 0) {
+        if (dpms_available && momx_read_file(dpms_path, buf, sizeof(buf)) > 0) {
             current_state = strstr(buf, "On") ? 1 : 0;
         }
-        else if (momx_read_file(BACKLIGHT_PATH, buf, sizeof(buf)) > 0) {
+        else if (backlight_available && momx_read_file(backlight_path, buf, sizeof(buf)) > 0) {
             long bl_val;
             if (!kstrtol(buf, 10, &bl_val)) {
                 current_state = (bl_val > 0) ? 1 : 0;
