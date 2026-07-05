@@ -1,0 +1,1 @@
+obj-$(CONFIG_DYNAMIC_FSYNC) += dynamic_fsync_driver.o
