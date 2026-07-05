@@ -236,6 +236,27 @@ runs:
         fi
       done
 
+  - name: 'Install Clang 22'
+    shell: bash
+    run: |
+      set -euo pipefail
+      wget https://apt.llvm.org/llvm.sh
+      chmod +x llvm.sh
+      sudo ./llvm.sh 22
+      # llvm.sh installs version-suffixed binaries (clang-22, ld.lld-22,
+      # etc). Symlink them to unversioned names so the existing
+      # CC/CXX/LD invocations in the "Build Kernel" step below don't
+      # need to change.
+      sudo ln -sf /usr/bin/clang-22 /usr/bin/clang
+      sudo ln -sf /usr/bin/clang++-22 /usr/bin/clang++
+      sudo ln -sf /usr/bin/ld.lld-22 /usr/bin/ld.lld
+      sudo ln -sf /usr/bin/llvm-ar-22 /usr/bin/llvm-ar
+      sudo ln -sf /usr/bin/llvm-nm-22 /usr/bin/llvm-nm
+      sudo ln -sf /usr/bin/llvm-objcopy-22 /usr/bin/llvm-objcopy
+      sudo ln -sf /usr/bin/llvm-strip-22 /usr/bin/llvm-strip
+      clang --version
+      ld.lld --version
+
   - name: 'Build Kernel'
     shell: bash
     working-directory: ${{ github.workspace }}/kernel
@@ -253,9 +274,9 @@ runs:
         BUILD_CONFIG=common/build.config.gki.aarch64 \
         build/build.sh -j"$(nproc)" \
         CC="/usr/bin/ccache clang" \
-        CXX="/usr/bin/ccache clang+" \
+        CXX="/usr/bin/ccache clang++" \
         HOSTCC="/usr/bin/ccache clang" \
-        HOSTCXX="/usr/bin/ccache clang+" \
+        HOSTCXX="/usr/bin/ccache clang++" \
         LD="${{ github.workspace }}/kernel/common/ld-wrapper" \
         HOSTLD="${{ github.workspace }}/kernel/common/ld-wrapper"
       else
