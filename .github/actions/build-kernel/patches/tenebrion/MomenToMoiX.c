@@ -15,22 +15,23 @@
 #include <linux/suspend.h>
 #include <linux/notifier.h>
 #include <linux/moduleparam.h>
+#include <linux/workqueue.h>
 
 MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
 
-static int poll_interval_ms = 1000; 
+static int poll_interval_ms = 1000;
 module_param(poll_interval_ms, int, 0644);
 
 static int boot_delay_ms = 40000;
 module_param(boot_delay_ms, int, 0644);
 
-static int thermal_threshold_mc = 65000; 
+static int thermal_threshold_mc = 65000;
 module_param(thermal_threshold_mc, int, 0644);
 
 static int thermal_hysteresis_mc = 5000;
 module_param(thermal_hysteresis_mc, int, 0644);
 
-static int thermal_hold_ms = 3000; 
+static int thermal_hold_ms = 3000;
 module_param(thermal_hold_ms, int, 0644);
 
 static int charging_freq_bias_percent = 20;
@@ -38,6 +39,15 @@ module_param(charging_freq_bias_percent, int, 0644);
 
 static int doze_active_freq_bias_percent = 10;
 module_param(doze_active_freq_bias_percent, int, 0644);
+
+/* --- NEW: Wake Boost feature params --- */
+static int wake_boost_percent = 100;
+module_param(wake_boost_percent, int, 0644);
+MODULE_PARM_DESC(wake_boost_percent, "Freq floor (%) briefly applied right after screen-on for snappier wake. 0 disables.");
+
+static int wake_boost_ms = 1200;
+module_param(wake_boost_ms, int, 0644);
+MODULE_PARM_DESC(wake_boost_ms, "Duration (ms) the wake boost floor is held before reverting to normal scaling.");
 
 #define DPMS_PATH           "/sys/class/drm/card0-DSI-1/dpms"
 #define BACKLIGHT_PATH      "/sys/class/backlight/panel0-backlight/brightness"
@@ -70,6 +80,7 @@ static DEFINE_MUTEX(momx_lock);
 
 static bool is_screen_off = false;
 static bool in_deep_sleep = false;
+static bool force_resync = false;   /* NEW: forces a state resync after suspend/resume */
 static bool thermal_hold_active = false;
 static unsigned long thermal_hold_expire = 0;
 static int last_temp_mc = -273000;
@@ -79,6 +90,11 @@ static bool power_status_available = false;
 static char iosched_path[64] = "";
 static char default_iosched[32] = "none";
 static bool iosched_available = false;
+
+/* NEW: Wake Boost workqueue plumbing */
+static struct workqueue_struct *momx_wq;
+static struct delayed_work wake_boost_work;
+static bool wake_boost_active = false;
 
 static int momx_read_file(const char *path, char *buf, size_t size) {
     struct file *f;
@@ -156,7 +172,7 @@ static void momx_cpuset_restore(void) {
 }
 
 static void momx_iosched_detect(void) {
-    char buf[128]; 
+    char buf[128];
     int i;
     char *start;
     char *end;
@@ -217,6 +233,43 @@ static void momx_qos_init(void) {
     pr_info("Initialized Freq QoS requests for %d CPUs\n", count);
 }
 
+/* FIX #2: hotplug-aware QoS lifecycle.
+ * Previously momx_qos_init() only ran once at boot, so any cpufreq policy
+ * created later (e.g. a cluster brought back online after being hotplugged
+ * off) never got a QoS request registered, silently excluding it from all
+ * throttling logic. This policy notifier keeps qos_initialized[] in sync
+ * with the actual set of live cpufreq policies for the driver's lifetime. */
+static int momx_cpufreq_policy_notifier(struct notifier_block *nb, unsigned long event, void *data) {
+    struct cpufreq_policy *policy = data;
+    unsigned int cpu;
+
+    if (!policy) return NOTIFY_OK;
+    cpu = policy->cpu;
+
+    if (event == CPUFREQ_CREATE_POLICY) {
+        mutex_lock(&momx_lock);
+        if (!qos_initialized[cpu]) {
+            freq_qos_add_request(&policy->constraints, &momx_min_req[cpu], FREQ_QOS_MIN, policy->cpuinfo.min_freq);
+            freq_qos_add_request(&policy->constraints, &momx_max_req[cpu], FREQ_QOS_MAX, policy->cpuinfo.max_freq);
+            qos_initialized[cpu] = true;
+            pr_info("Hotplug: QoS request (re)initialized for CPU%u policy\n", cpu);
+        }
+        mutex_unlock(&momx_lock);
+    } else if (event == CPUFREQ_REMOVE_POLICY) {
+        mutex_lock(&momx_lock);
+        if (qos_initialized[cpu]) {
+            freq_qos_remove_request(&momx_min_req[cpu]);
+            freq_qos_remove_request(&momx_max_req[cpu]);
+            qos_initialized[cpu] = false;
+            pr_info("Hotplug: QoS request torn down for CPU%u policy (offline)\n", cpu);
+        }
+        mutex_unlock(&momx_lock);
+    }
+    return NOTIFY_OK;
+}
+
+static struct notifier_block momx_cpufreq_nb = { .notifier_call = momx_cpufreq_policy_notifier };
+
 static void momx_apply_freq_bias(int percent) {
     unsigned int cpu;
     struct cpufreq_policy *policy;
@@ -249,10 +302,45 @@ static void momx_restore_freq(void) {
     pr_info("Restored stock CPU frequencies (QoS restrictions cleared)\n");
 }
 
+/* --- NEW FEATURE: Wake Boost ---
+ * When the screen turns on, briefly hold a high frequency floor so the
+ * unlock animation / first app launch feels snappy, then let the stock
+ * governor take back over. Runs on a workqueue so it never blocks the
+ * watcher thread's polling loop. */
+static void momx_wake_boost_work_fn(struct work_struct *work) {
+    mutex_lock(&momx_lock);
+    if (wake_boost_active && !is_screen_off && !thermal_hold_active) {
+        momx_restore_freq();
+        pr_info("Wake Boost: window expired, restoring normal frequency scaling\n");
+    }
+    wake_boost_active = false;
+    mutex_unlock(&momx_lock);
+}
+
+static void momx_trigger_wake_boost(void) {
+    if (wake_boost_percent <= 0 || wake_boost_ms <= 0) return;
+    wake_boost_active = true;
+    momx_apply_freq_bias(wake_boost_percent);
+    pr_info("Wake Boost: applying %d%% freq floor for %d ms\n", wake_boost_percent, wake_boost_ms);
+    mod_delayed_work(momx_wq, &wake_boost_work, msecs_to_jiffies(wake_boost_ms));
+}
+
+static void momx_cancel_wake_boost(void) {
+    if (wake_boost_active) {
+        cancel_delayed_work_sync(&wake_boost_work);
+        wake_boost_active = false;
+    }
+}
+
 static void momx_on_screen_off(void) {
     bool charging;
     int bias;
     int temp;
+
+    /* Screen went off again before a pending wake boost expired on its own
+     * (e.g. quick peek at the phone) — cancel it so it doesn't race with
+     * the screen-off bias we're about to apply. */
+    momx_cancel_wake_boost();
 
     charging = momx_is_charging();
     bias = charging ? charging_freq_bias_percent : doze_active_freq_bias_percent;
@@ -274,6 +362,8 @@ static void momx_on_screen_off(void) {
 }
 
 static void momx_on_screen_on(void) {
+    int temp;
+
     is_screen_off = false;
     pr_info("Display Mode: ON\n");
 
@@ -281,10 +371,25 @@ static void momx_on_screen_on(void) {
     momx_iosched_restore();
 
     if (thermal_hold_active) {
-        thermal_hold_expire = jiffies + msecs_to_jiffies(thermal_hold_ms);
-        pr_info("Thermal hold active! Maintaining CPU freq bias restriction for %d ms.\n", thermal_hold_ms);
+        /* FIX #4: previously we always re-armed a fresh thermal_hold_expire
+         * timer here, even if the device had already cooled down while the
+         * screen was off. That let a stale hold flag "stick" for up to
+         * thermal_hold_ms longer than necessary on every subsequent wake.
+         * Now we re-check the current temperature immediately and release
+         * right away if it's already safe. */
+        temp = momx_read_max_temp();
+        if (temp < (thermal_threshold_mc - thermal_hysteresis_mc)) {
+            pr_info("Thermal hold resolved immediately on wake (%d mC). Releasing CPU frequencies.\n", temp);
+            thermal_hold_active = false;
+            momx_restore_freq();
+            momx_trigger_wake_boost();
+        } else {
+            thermal_hold_expire = jiffies + msecs_to_jiffies(thermal_hold_ms);
+            pr_info("Thermal hold still active (%d mC). Maintaining CPU freq bias restriction for %d ms.\n", temp, thermal_hold_ms);
+        }
     } else {
         momx_restore_freq();
+        momx_trigger_wake_boost();
     }
 }
 
@@ -310,6 +415,7 @@ static int momx_pm_notifier(struct notifier_block *nb, unsigned long action, voi
         in_deep_sleep = true;
     } else if (action == PM_POST_SUSPEND) {
         in_deep_sleep = false;
+        force_resync = true; /* re-detect display state instead of trusting stale cache */
     }
     return NOTIFY_OK;
 }
@@ -324,17 +430,34 @@ static int momx_watcher(void *data) {
 
     momx_qos_init();
     momx_charge_detect();
-    momx_iosched_detect(); 
+    momx_iosched_detect();
 
     pr_info("Watcher core loop active (Sysfs Polling mode).\n");
 
-    while (!kthread_should_stop()) { 
+    while (!kthread_should_stop()) {
         int current_state = -1;
         char buf[64];
 
+        /* FIX #1: in_deep_sleep was set by the PM notifier but never
+         * actually consulted anywhere, so it was dead code — the watcher
+         * kept polling and touching cpuset/iosched/cpufreq sysfs nodes
+         * even while the system was mid-suspend/resume, which is both
+         * pointless and a potential race with the suspend path. Now we
+         * park the loop during that window and force a clean resync
+         * right after resume. */
+        if (in_deep_sleep) {
+            msleep_interruptible(poll_interval_ms);
+            continue;
+        }
+
+        if (force_resync) {
+            last_state = -1;
+            force_resync = false;
+        }
+
         if (momx_read_file(DPMS_PATH, buf, sizeof(buf)) > 0) {
             current_state = strstr(buf, "On") ? 1 : 0;
-        } 
+        }
         else if (momx_read_file(BACKLIGHT_PATH, buf, sizeof(buf)) > 0) {
             long bl_val;
             if (!kstrtol(buf, 10, &bl_val)) {
@@ -362,14 +485,30 @@ static int momx_watcher(void *data) {
 }
 
 static int __init momx_init(void) {
+    int ret;
+
     pr_info("Loading MomenToMoiX (Hybrid Engine)...\n");
 
+    momx_wq = alloc_ordered_workqueue("momx_wq", 0);
+    if (!momx_wq) {
+        pr_err("Failed to allocate wake-boost workqueue!\n");
+        return -ENOMEM;
+    }
+    INIT_DELAYED_WORK(&wake_boost_work, momx_wake_boost_work_fn);
+
     register_pm_notifier(&momx_pm_nb);
+
+    ret = cpufreq_register_notifier(&momx_cpufreq_nb, CPUFREQ_POLICY_NOTIFIER);
+    if (ret) {
+        pr_warn("Failed to register cpufreq policy notifier (hotplug QoS sync disabled): %d\n", ret);
+    }
 
     watcher_thread = kthread_run(momx_watcher, NULL, "momx_watch");
     if (IS_ERR(watcher_thread)) {
         pr_err("Failed to run watcher kthread!\n");
+        cpufreq_unregister_notifier(&momx_cpufreq_nb, CPUFREQ_POLICY_NOTIFIER);
         unregister_pm_notifier(&momx_pm_nb);
+        destroy_workqueue(momx_wq);
         return PTR_ERR(watcher_thread);
     }
 
@@ -381,6 +520,12 @@ static void __exit momx_exit(void) {
         kthread_stop(watcher_thread);
     }
 
+    momx_cancel_wake_boost();
+    if (momx_wq) {
+        destroy_workqueue(momx_wq);
+    }
+
+    cpufreq_unregister_notifier(&momx_cpufreq_nb, CPUFREQ_POLICY_NOTIFIER);
     unregister_pm_notifier(&momx_pm_nb);
 
     momx_restore_freq();
