@@ -253,8 +253,9 @@ runs:
       cp "${{ github.action_path }}/patches/dynamic_fsync/sync.c" \
          "$TARGET_DIR/fs/sync.c"
 
-      # Standalone driver module (backlight-notifier based screen-state
-      # detection -- writes dynamic_fsync_state, which fs/sync.c reads).
+      # Standalone driver module (polling-based screen-state detection,
+      # same DPMS-then-backlight probing approach as MomenToMoiX --
+      # writes dynamic_fsync_state, which fs/sync.c reads).
       mkdir -p "$TARGET_DIR/drivers/dynamic_fsync"
       cp "${{ github.action_path }}/patches/dynamic_fsync/dynamic_fsync_driver.c" \
          "$TARGET_DIR/drivers/dynamic_fsync/dynamic_fsync_driver.c"
@@ -262,6 +263,29 @@ runs:
          "$TARGET_DIR/drivers/dynamic_fsync/Makefile"
       if ! grep -q "dynamic_fsync/" "$TARGET_DIR/drivers/Makefile"; then
         echo "obj-y += dynamic_fsync/" >> "$TARGET_DIR/drivers/Makefile"
+      fi
+
+      # Kconfig symbol. Without this, CONFIG_DYNAMIC_FSYNC in the
+      # defconfig has no backing symbol -- it can get silently dropped
+      # on any future oldconfig/syncconfig regen (or if check_defconfig
+      # is ever re-enabled), disabling the whole feature with zero
+      # build errors. Written inline here instead of a separate patches
+      # file so the symbol definition lives next to the step that wires
+      # it in. Insert the source line before the first `endmenu` in
+      # drivers/Kconfig.
+      cat > "$TARGET_DIR/drivers/dynamic_fsync/Kconfig" << 'EOF'
+      config DYNAMIC_FSYNC
+      	bool "Dynamic fsync (screen-state aware fsync toggle)"
+      	default y
+      	help
+      	  Skip fsync()/fdatasync() writeback while the screen is on to
+      	  eliminate write-back stalls during UI-critical moments.
+      	  Re-enabled automatically when the screen turns off (driven by
+      	  dynamic_fsync_driver.c, with MomenToMoiX reconciling screen
+      	  state on every poll cycle).
+      EOF
+      if ! grep -q 'source "drivers/dynamic_fsync/Kconfig"' "$TARGET_DIR/drivers/Kconfig"; then
+        sed -i '0,/^endmenu/s||source "drivers/dynamic_fsync/Kconfig"\n&|' "$TARGET_DIR/drivers/Kconfig"
       fi
 
       # Defconfig fix: CONFIG_DYNAMIC_FSYNC must be y, otherwise
@@ -281,6 +305,10 @@ runs:
       fi
       if ! grep -q "CONFIG_DYNAMIC_FSYNC" "$DEFCONFIG_GKI" 2>/dev/null; then
         echo "ERROR: CONFIG_DYNAMIC_FSYNC missing from gki_defconfig after patch" >&2
+        exit 1
+      fi
+      if ! grep -q 'source "drivers/dynamic_fsync/Kconfig"' "$TARGET_DIR/drivers/Kconfig"; then
+        echo "ERROR: failed to source dynamic_fsync Kconfig into drivers/Kconfig" >&2
         exit 1
       fi
 
@@ -349,7 +377,6 @@ runs:
         exit 0
       fi
       exit 1
-
   - name: 'Patch AnyKernel3 for Bypass Hack'
     shell: bash
     if: ${{ inputs.bypass == 'true' }}
@@ -358,3 +385,6 @@ runs:
       set -euo pipefail
       cp ${{ github.action_path }}/patches/bypass.patch "${{ github.workspace }}/AnyKernel3/bypass.patch"
       patch -p1 < bypass.patch
+
+
+  
