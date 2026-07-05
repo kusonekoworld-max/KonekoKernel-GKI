@@ -100,201 +100,141 @@ runs:
         fi
       fi
 
-  - name: 'Inject Zenith & Hikari Governor'
+  - name: 'Inject Vorpal Governor + GKI510 Compat'
     shell: bash
     run: |
       set -euo pipefail
       TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
-      
-      # 1. Buat semua direktori tujuan terlebih dahulu
+
       mkdir -p "$TARGET_DIR/kernel/sched"
-      mkdir -p "$TARGET_DIR/include/linux"
-      mkdir -p "$TARGET_DIR/include/trace/events"
+      cp "${{ github.action_path }}/patches/vorpal/cpufreq_vorpal.c" "$TARGET_DIR/kernel/sched/cpufreq_vorpal.c"
+      cp "${{ github.action_path }}/patches/vorpal/rfx_gki510_compat.c" "$TARGET_DIR/kernel/sched/rfx_gki510_compat.c"
 
-      # 2. Salin seluruh berkas mentah di awal agar tidak menimpa hasil modifikasi di bawah
-      cp "${{ github.action_path }}/patches/zenith/cpufreq_zenith.c" "$TARGET_DIR/kernel/sched/cpufreq_zenith.c"
-      cp "${{ github.action_path }}/patches/zenith/hikari.c" "$TARGET_DIR/kernel/sched/hikari.c"
-      cp "${{ github.action_path }}/patches/zenith/cpufreq_zenith.h" "$TARGET_DIR/include/linux/cpufreq_zenith.h"
-      cp "${{ github.action_path }}/patches/zenith/hikari.h" "$TARGET_DIR/include/linux/hikari.h"
-      cp "${{ github.action_path }}/patches/zenith/zenith_profiles.h" "$TARGET_DIR/include/linux/zenith_profiles.h"
-      cp "${{ github.action_path }}/patches/zenith/trace_cpufreq_zenith.h" "$TARGET_DIR/include/trace/events/cpufreq_zenith.h"
-      cp "${{ github.action_path }}/patches/zenith/trace_hikari.h" "$TARGET_DIR/include/trace/events/hikari.h"
-
-      # 3. Lakukan modifikasi sed untuk mengalihkan ke fungsi global effective_cpu_util
-      ZENITH_C="$TARGET_DIR/kernel/sched/cpufreq_zenith.c"
-      sed -i '/unsigned long schedutil_cpu_util(/d' "$ZENITH_C"
-      sed -i 's/schedutil_cpu_util/effective_cpu_util/g' "$ZENITH_C"
-
-      # 4. Suntikkan portable compat shim untuk uclamp jika basis kernel berumur lama (5.15)
-      if ! grep -q "zenith_uclamp_rq_get" "$ZENITH_C"; then
-        cat > /tmp/zenith_uclamp_shim.txt <<'EOF'
-
-      /*
-       * Compat shim: this base kernel tree (5.15) predates upstream's
-       * uclamp_rq_get()/uclamp_rq_set() wrapper pair in kernel/sched/sched.h.
-       * Falls back to the same plain field read the real helper does, so
-       * behavior is identical either way.
-       */
-      #ifdef CONFIG_UCLAMP_TASK
-      #ifndef uclamp_rq_get
-      static inline unsigned long zenith_uclamp_rq_get(struct rq *rq,
-                                                        enum uclamp_id clamp_id)
-      {
-              return READ_ONCE(rq->uclamp[clamp_id].value);
-      }
-      #define uclamp_rq_get(rq, clamp_id) zenith_uclamp_rq_get((rq), (clamp_id))
-      #endif
-      #endif
-      EOF
-        sed -i 's/^      //' /tmp/zenith_uclamp_shim.txt
-        sed -i '/^#include <linux\/hikari\.h>/r /tmp/zenith_uclamp_shim.txt' "$ZENITH_C"
+      if ! grep -q "cpufreq_vorpal.o" "$TARGET_DIR/kernel/sched/Makefile"; then
+        echo 'obj-$(CONFIG_CPU_FREQ_GOV_VORPAL) += cpufreq_vorpal.o' >> "$TARGET_DIR/kernel/sched/Makefile"
       fi
 
-      # 5. Penyesuaian Tracepoint Header
-      ZENITH_TRACE_H="$TARGET_DIR/include/trace/events/cpufreq_zenith.h"
-      HIKARI_TRACE_H="$TARGET_DIR/include/trace/events/hikari.h"
-
-      if ! grep -q "TRACE_INCLUDE_PATH trace/events" "$ZENITH_TRACE_H"; then
-        perl -0pi -e 's{(#include <trace/define_trace\.h>)}{#undef TRACE_INCLUDE_PATH\n#undef TRACE_INCLUDE_FILE\n#define TRACE_INCLUDE_PATH trace/events\n#define TRACE_INCLUDE_FILE cpufreq_zenith\n$1}' "$ZENITH_TRACE_H"
+      # rfx_gki510_compat.o must ALWAYS be built (obj-y), not gated
+      # behind CONFIG_CPU_FREQ_GOV_VORPAL. It defines sched_gaming_active,
+      # which kernel/sched/fair.c references unconditionally (see the
+      # fair.c patch step below) since fair.c is core scheduler code
+      # that's always compiled regardless of which cpufreq governor is
+      # selected. Gating this file behind the governor's Kconfig would
+      # make fair.c fail to link whenever Vorpal is disabled.
+      if ! grep -q "rfx_gki510_compat.o" "$TARGET_DIR/kernel/sched/Makefile"; then
+        echo 'obj-y += rfx_gki510_compat.o' >> "$TARGET_DIR/kernel/sched/Makefile"
       fi
 
-      if ! grep -q "TRACE_INCLUDE_PATH trace/events" "$HIKARI_TRACE_H"; then
-        perl -0pi -e 's{(#include <trace/define_trace\.h>)}{#undef TRACE_INCLUDE_PATH\n#undef TRACE_INCLUDE_FILE\n#define TRACE_INCLUDE_PATH trace/events\n#define TRACE_INCLUDE_FILE hikari\n$1}' "$HIKARI_TRACE_H"
-      fi
-
-      for TRACE_H in "$ZENITH_TRACE_H" "$HIKARI_TRACE_H"; do
-        perl -0pi -e 's{(#include <trace/define_trace\.h>\n)#undef TRACE_INCLUDE_PATH\n#undef TRACE_INCLUDE_FILE\n}{$1}g' "$TRACE_H"
-      done
-
-      for spec in "cpufreq_zenith.c:cpufreq_zenith.h" "hikari.c:hikari.h"; do
-        C_FILE="${spec%%:*}"
-        H_FILE="${spec##*:}"
-        C_PATH="$TARGET_DIR/kernel/sched/$C_FILE"
-        if [ -f "$C_PATH" ] && grep -q "#include <trace/events/$H_FILE>" "$C_PATH"; then
-          if ! grep -A2 "#include <trace/events/$H_FILE>" "$C_PATH" | grep -q "#undef TRACE_INCLUDE_PATH"; then
-            perl -0pi -e "s{(#include <trace/events/\Q$H_FILE\E>\n)}{\$1#undef TRACE_INCLUDE_PATH\n#undef TRACE_INCLUDE_FILE\n}" "$C_PATH"
-          fi
-        fi
-      done
-
-      # 6. Registrasi ke Makefile dan Kconfig
-      if ! grep -q "cpufreq_zenith.o" "$TARGET_DIR/kernel/sched/Makefile"; then
-        echo 'obj-$(CONFIG_CPU_FREQ_GOV_ZENITH) += cpufreq_zenith.o' >> "$TARGET_DIR/kernel/sched/Makefile"
-      fi
-      if ! grep -q "hikari.o" "$TARGET_DIR/kernel/sched/Makefile"; then
-        echo 'obj-$(CONFIG_CPU_FREQ_GOV_ZENITH) += hikari.o' >> "$TARGET_DIR/kernel/sched/Makefile"
-      fi
-
-      if ! grep -q "config CPU_FREQ_GOV_ZENITH" "$TARGET_DIR/drivers/cpufreq/Kconfig"; then
-        printf "\nconfig CPU_FREQ_GOV_ZENITH\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
-        printf "\ttristate \"'zenith' and 'hikari' cpufreq governor\"\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+      if ! grep -q "config CPU_FREQ_GOV_VORPAL" "$TARGET_DIR/drivers/cpufreq/Kconfig"; then
+        printf "\nconfig CPU_FREQ_GOV_VORPAL\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+        printf "\ttristate \"'vorpal' cpufreq governor\"\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
         printf "\tdepends on CPU_FREQ && SMP\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
         printf "\tselect CPU_FREQ_GOV_ATTR_SET\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
         printf "\thelp\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
-        printf "\t  'zenith' and 'hikari' are advanced custom CPU frequency governors\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
-        printf "\t  designed for optimized performance and energy awareness.\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
-      fi
-
-      if ! grep -q "config HIKARI" "$TARGET_DIR/drivers/cpufreq/Kconfig"; then
-        printf "\nconfig HIKARI\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
-        printf "\tbool \"Hikari wake-time policy engine\"\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
-        printf "\tdepends on CPU_FREQ_GOV_ZENITH\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
-        printf "\tdefault y\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
-        printf "\thelp\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
-        printf "\t  Enables the Hikari wake-time policy engine consumed by\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
-        printf "\t  the 'zenith' cpufreq governor.\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
-      fi
-
-      if ! grep -q "config HIKARI_UCLAMP" "$TARGET_DIR/drivers/cpufreq/Kconfig"; then
-        printf "\nconfig HIKARI_UCLAMP\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
-        printf "\tbool \"Hikari uclamp_min wake-time boost\"\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
-        printf "\tdepends on HIKARI\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
-        printf "\tdefault y\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
-        printf "\thelp\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
-        printf "\t  Enables Hikari's time-limited per-task uclamp_min boost\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
-        printf "\t  on wake-up, tuned via hikari_uclamp_ttl_ms/hikari_uclamp_max_pct.\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+        printf "\t  'vorpal' is a schedutil-based governor tuned for\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+        printf "\t  gaming/thermal-aware dual-profile operation.\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
       fi
 
       DEFCONFIG_GKI="$TARGET_DIR/arch/arm64/configs/gki_defconfig"
-      if [ -f "$DEFCONFIG_GKI" ]; then
-        if ! grep -q "CONFIG_CPU_FREQ_GOV_ZENITH" "$DEFCONFIG_GKI"; then
-          echo "CONFIG_CPU_FREQ_GOV_ZENITH=y" >> "$DEFCONFIG_GKI"
-        fi
-        if ! grep -q "CONFIG_HIKARI=" "$DEFCONFIG_GKI"; then
-          echo "CONFIG_HIKARI=y" >> "$DEFCONFIG_GKI"
-        fi
-        if ! grep -q "CONFIG_HIKARI_UCLAMP" "$DEFCONFIG_GKI"; then
-          echo "CONFIG_HIKARI_UCLAMP=y" >> "$DEFCONFIG_GKI"
-        fi
+      if [ -f "$DEFCONFIG_GKI" ] && ! grep -q "CONFIG_CPU_FREQ_GOV_VORPAL" "$DEFCONFIG_GKI"; then
+        echo "CONFIG_CPU_FREQ_GOV_VORPAL=y" >> "$DEFCONFIG_GKI"
       fi
 
-  - name: 'Fix schedutil_cpu_util Linkage for Zenith'
-    shell: bash
-    run: |
-      set -euo pipefail
-      TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
-      DEFCONFIG_GKI="$TARGET_DIR/arch/arm64/configs/gki_defconfig"
-      
-      echo "Ensuring Schedutil is built-in for Zenith compatibility..."
-
-      if [ -f "$DEFCONFIG_GKI" ]; then
-        if grep -q '^CONFIG_CPU_FREQ_GOV_SCHEDUTIL' "$DEFCONFIG_GKI"; then
-          sed -i 's/^CONFIG_CPU_FREQ_GOV_SCHEDUTIL.*/CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y/' "$DEFCONFIG_GKI"
-        else
-          echo "CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y" >> "$DEFCONFIG_GKI"
-        fi
-        echo "CONFIG_CPU_FREQ_GOV_SCHEDUTIL set to y successfully."
-      else
-        echo "::error::gki_defconfig not found at $DEFCONFIG_GKI"
-        exit 1
-      fi
-
-  - name: 'Inject Hikari Flags'
+  - name: 'Fix Vorpal Input-Handler Init Bug'
     shell: bash
     working-directory: ${{ github.workspace }}/kernel/common
     run: |
       set -euo pipefail
-      SCHED_H="include/linux/sched.h"
+      VORPAL_C="kernel/sched/cpufreq_vorpal.c"
 
-      echo "Checking for hikari_flags in sched.h"
-      if ! grep -q "hikari_flags;" "$SCHED_H"; then
-        echo "Injecting hikari_flags"
-        sed -i '/struct thread_struct[[:space:]]*thread;/a \
-        \tu32 hikari_flags;' "$SCHED_H"
-        echo "Injection successful"
-      else
-        echo "hikari_flags already present"
+      # vorpal_gov_init() unconditionally calls
+      # input_unregister_handler() in the cpufreq_register_governor()
+      # failure path, even when input_register_handler() itself had
+      # already failed earlier (only pr_warn'd, never tracked). If
+      # both registrations fail on module load, that unregisters a
+      # handler that was never actually linked into the input core's
+      # list -- list corruption / crash. Track success explicitly and
+      # only unregister what was actually registered.
+
+      if ! grep -q "bool input_ok;" "$VORPAL_C"; then
+        perl -0pi -e 's{(static int __init vorpal_gov_init\(void\)\n\{\n\tint ret;\n)}{$1\tbool input_ok;\n}' "$VORPAL_C"
       fi
 
-      echo "Checking for hikari_boost_until_ns in sched.h"
-      if ! grep -q "hikari_boost_until_ns;" "$SCHED_H"; then
-        echo "Injecting hikari_boost_until_ns"
-        sed -i '/struct thread_struct[[:space:]]*thread;/a \
-        \tu32 hikari_boost_until_ns;' "$SCHED_H"
-        echo "Injection successful"
-      else
-        echo "hikari_boost_until_ns already present"
+      if ! grep -q "input_ok = !input_register_handler" "$VORPAL_C"; then
+        perl -0pi -e 's{\tif \(input_register_handler\(&rfx_input_handler\)\)\n\t\tpr_warn\("vorpal: input handler register failed \(touch boost off\)\\n"\);}{\tinput_ok = !input_register_handler(&rfx_input_handler);\n\tif (!input_ok)\n\t\tpr_warn("vorpal: input handler register failed (touch boost off)\\n");}' "$VORPAL_C"
       fi
 
-      echo "Checking for hikari_last_enqueue_ns in sched.h"
-      if ! grep -q "hikari_last_enqueue_ns;" "$SCHED_H"; then
-        echo "Injecting hikari_last_enqueue_ns"
-        sed -i '/struct thread_struct[[:space:]]*thread;/a \
-        \tu32 hikari_last_enqueue_ns;' "$SCHED_H"
-        echo "Injection successful"
-      else
-        echo "hikari_last_enqueue_ns already present"
+      if ! grep -q "if (input_ok)" "$VORPAL_C"; then
+        perl -0pi -e 's{\tret = cpufreq_register_governor\(&vorpal_gov\);\n\tif \(ret\) \{\n\t\tinput_unregister_handler\(&rfx_input_handler\);\n\t\tcancel_delayed_work_sync\(&rfx_thermal_work\);\n\t\}}{\tret = cpufreq_register_governor(&vorpal_gov);\n\tif (ret) \{\n\t\tif (input_ok)\n\t\t\tinput_unregister_handler(&rfx_input_handler);\n\t\tcancel_delayed_work_sync(&rfx_thermal_work);\n\t\}}' "$VORPAL_C"
       fi
 
-      echo "Checking for hikari_wait_ewma_ns in sched.h"
-      if ! grep -q "hikari_wait_ewma_ns;" "$SCHED_H"; then
-        echo "Injecting hikari_wait_ewma_ns"
-        sed -i '/struct thread_struct[[:space:]]*thread;/a \
-        \tu32 hikari_wait_ewma_ns;' "$SCHED_H"
-        echo "Injection successful"
-      else
-        echo "hikari_wait_ewma_ns already present"
+      # Sanity check, fail loudly here rather than silently no-op'ing
+      # if vorpal.c's source drifted from the anchors above.
+      if ! grep -q "bool input_ok;" "$VORPAL_C"; then
+        echo "ERROR: failed to inject 'bool input_ok;' into vorpal_gov_init()" >&2
+        exit 1
       fi
+      if ! grep -q "input_ok = !input_register_handler" "$VORPAL_C"; then
+        echo "ERROR: failed to patch input_register_handler() call in vorpal_gov_init()" >&2
+        exit 1
+      fi
+      if ! grep -q "if (input_ok)" "$VORPAL_C"; then
+        echo "ERROR: failed to guard input_unregister_handler() in vorpal_gov_init() error path" >&2
+        exit 1
+      fi
+
+  - name: 'Inject Vorpal Gaming-Mode Bias into fair.c'
+    shell: bash
+    working-directory: ${{ github.workspace }}/kernel/common
+    run: |
+      set -euo pipefail
+      FAIR_C="kernel/sched/fair.c"
+
+      # sched_gaming_active is defined+exported by rfx_gki510_compat.c
+      # (step above). Declare it + the vruntime-stretch constant here.
+      # Anchored right after sysctl_sched_latency's own definition
+      # block, a stable, always-present line in vanilla CFS.
+      if ! grep -q "extern int sched_gaming_active;" "$FAIR_C"; then
+        perl -0pi -e 's{(static unsigned int normalized_sysctl_sched_latency\s*=\s*6000000ULL;)}{$1\n\n/*\n * Vorpal gaming coupling. File-scope global (KMI-safe: not a\n * task_struct/sched_entity field), written by the Vorpal governor'"'"'s\n * gaming_mode knob, read here to bias CFS behaviour during sustained\n * gaming. 0 == normal CFS behaviour.\n */\nextern int sched_gaming_active;\n\n#define GAMING_VRUNTIME_STRETCH\t\t4\n}' "$FAIR_C"
+      fi
+
+      # 1) update_curr(): stretch vruntime for background (non-task /
+      # light-load) entities while gaming, so foreground work keeps
+      # more of the CPU.
+      if ! grep -q "GAMING_VRUNTIME_STRETCH - 1" "$FAIR_C"; then
+        perl -0pi -e 's{(\tcurr->vruntime \+= calc_delta_fair\(delta_exec, curr\);\n)(\tupdate_min_vruntime\(cfs_rq\);\n)}{$1\n\t/* Gaming mode: stretch vruntime for background tasks */\n\tif (unlikely(sched_gaming_active \&\& !entity_is_task(curr))) {\n\t\tcurr->vruntime += calc_delta_fair(delta_exec * (GAMING_VRUNTIME_STRETCH - 1), curr);\n\t} else if (unlikely(sched_gaming_active \&\& entity_is_task(curr) \&\&\n\t\t\t     curr->avg.load_avg < 100)) {\n\t\tcurr->vruntime += calc_delta_fair(delta_exec, curr);\n\t}\n$2}' "$FAIR_C"
+      fi
+
+      # 2) check_preempt_tick(): reduce ideal runtime for background
+      # (nice > 0) tasks while gaming, so they yield to foreground work
+      # sooner. entity_is_task() guard added on top of the original
+      # design -- task_of() on a cgroup group entity would be unsafe.
+      if ! grep -q "Gaming mode: reduce ideal runtime" "$FAIR_C"; then
+        perl -0pi -e 's{(\tdelta_exec = curr->sum_exec_runtime - curr->prev_sum_exec_runtime;\n)(\ttrace_android_rvh_check_preempt_tick)}{$1\n\t/* Gaming mode: reduce ideal runtime for background tasks */\n\tif (unlikely(sched_gaming_active) \&\& entity_is_task(curr)) {\n\t\tstruct task_struct *p = task_of(curr);\n\n\t\tif (p->static_prio > DEFAULT_PRIO \&\&\n\t\t    delta_exec > ideal_runtime / 2)\n\t\t\tresched_curr(rq_of(cfs_rq));\n\t}\n\n$2}' "$FAIR_C"
+      fi
+
+      # 3) enqueue_task_fair(): nudge foreground (nice <= 0) tasks to
+      # the front of the runqueue on wakeup for lower schedule latency.
+      if ! grep -q "Gaming mode: nudge foreground" "$FAIR_C"; then
+        perl -0pi -e 's{(\tfor_each_sched_entity\(se\) \{\n\t\tcfs_rq = cfs_rq_of\(se\);\n\n)(\t\tupdate_load_avg\(cfs_rq, se, UPDATE_TG\);\n\t\tse_update_runnable\(se\);\n\t\tupdate_cfs_group\(se\);)}{$1\t\t/* Gaming mode: nudge foreground (top-app) tasks to the front\n\t\t * of the runqueue so render / game-logic threads schedule with\n\t\t * less wakeup latency. Foreground approximated by nice <= 0\n\t\t * (static_prio <= DEFAULT_PRIO). Reads only, no struct change.\n\t\t */\n\t\tif (unlikely(sched_gaming_active \&\& entity_is_task(se) \&\&\n\t\t\t     task_of(se)->static_prio <= DEFAULT_PRIO))\n\t\t\tse->vruntime -= min_t(u64, se->vruntime, NSEC_PER_MSEC);\n\n$2}' "$FAIR_C"
+      fi
+
+      # 4) task_hot(): keep heavy render/game threads off a
+      # smaller-capacity (LITTLE) destination during the load balancer
+      # migration decision; bias only, active balance can still move it.
+      if ! grep -q "Gaming task isolation" "$FAIR_C"; then
+        perl -0pi -e 's{(\tdelta = rq_clock_task\(env->src_rq\) - p->se\.exec_start;\n\n)(\treturn delta < \(s64\)sysctl_sched_migration_cost;\n\}\n)}{$1\t/* Gaming task isolation + anti-thrash. Keep heavy render/game\n\t * threads off a smaller-capacity destination (demoting to LITTLE\n\t * is a common frame-drop source); light tasks stay migratable.\n\t * Bias only, not a hard pin -- active balance can still move it.\n\t */\n\tif (sched_gaming_active) {\n\t\tif (capacity_orig_of(env->dst_cpu) < capacity_orig_of(env->src_cpu) \&\&\n\t\t    task_util(p) > (capacity_orig_of(env->src_cpu) >> 3))\n\t\t\treturn 1;\n\t\treturn delta < (s64)sysctl_sched_migration_cost * 2;\n\t}\n\n$2}' "$FAIR_C"
+      fi
+
+      # Sanity check: fail loudly here instead of deep in the compile
+      # log if any anchor above didn't match (source drifted from
+      # what this patch expects).
+      for MARK in "extern int sched_gaming_active;" "GAMING_VRUNTIME_STRETCH - 1" "Gaming mode: reduce ideal runtime" "Gaming mode: nudge foreground" "Gaming task isolation"; do
+        if ! grep -qF "$MARK" "$FAIR_C"; then
+          echo "ERROR: failed to inject fair.c gaming patch, missing marker: $MARK" >&2
+          exit 1
+        fi
+      done
 
   - name: 'Build Kernel'
     shell: bash
