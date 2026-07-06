@@ -10,7 +10,7 @@
  * MomenToMoiX's momx_display_node_detect() -- probe a DPMS node
  * first (/sys/class/drm/cardN-DSI-1/dpms), fall back to a raw
  * backlight brightness node if no DPMS node is found or readable.
- * This replaces the previous backlight_register_notifier() based
+ * This replaces an earlier backlight_register_notifier() based
  * detection, which silently never fires on devices that expose
  * DRM-panel backlight without wiring backlight_update_status()
  * through the notifier chain -- on such devices dynamic_fsync_state
@@ -20,13 +20,20 @@
  * any notifier chain is actually driven by the vendor's backlight
  * driver.
  *
+ * Detection is retried on every poll cycle until a node is found,
+ * rather than probing once and giving up: panel/backlight drivers
+ * on some platforms probe late (deferred probe waiting on
+ * regulators/clocks), so a single attempt right at thread start can
+ * miss a node that only appears a few seconds into boot.
+ *
  * The core fsync path (fs/sync.c, do_fsync()) checks
  * dynamic_fsync_should_skip() (see include/linux/dynamic_fsync.h)
  * before issuing any writeback.
  *
  * Userspace control:
- *   /sys/module/dynamic_fsync_driver/parameters/enabled       (1/0, def 1)
+ *   /sys/module/dynamic_fsync_driver/parameters/enabled          (1/0, def 1)
  *   /sys/module/dynamic_fsync_driver/parameters/poll_interval_ms (def 1000)
+ *   /sys/module/dynamic_fsync_driver/parameters/boot_delay_ms    (def 15000)
  */
 #include <linux/module.h>
 #include <linux/kthread.h>
@@ -45,6 +52,10 @@ MODULE_PARM_DESC(enabled, "Enable dynamic fsync (default: true)");
 static int poll_interval_ms = 1000;
 module_param(poll_interval_ms, int, 0644);
 MODULE_PARM_DESC(poll_interval_ms, "Screen-state poll interval in ms (default: 1000)");
+
+static int boot_delay_ms = 15000;
+module_param(boot_delay_ms, int, 0644);
+MODULE_PARM_DESC(boot_delay_ms, "Delay before first display-node probe attempt, ms (default: 15000)");
 
 /* Same candidate lists / rationale as momx_display_node_detect():
  * display-state exposure isn't standardized across vendors, so we
@@ -104,8 +115,6 @@ static void dfsync_node_detect(void)
 			break;
 		}
 	}
-	if (!dpms_available)
-		pr_warn("dynamic_fsync: no DPMS node found, falling back to backlight\n");
 
 	for (i = 0; backlight_candidates[i] != NULL; i++) {
 		if (dfsync_read_file(backlight_candidates[i], buf, sizeof(buf)) > 0) {
@@ -115,22 +124,40 @@ static void dfsync_node_detect(void)
 			break;
 		}
 	}
-	if (!backlight_available)
-		pr_warn("dynamic_fsync: no backlight node found either\n");
 
 	if (!dpms_available && !backlight_available)
-		pr_err("dynamic_fsync: no usable display-state node -- screen detection disabled, fsync will never be skipped\n");
+		pr_debug("dynamic_fsync: no usable display-state node this attempt\n");
 }
 
 static int dfsync_watcher(void *data)
 {
 	int last_state = -1;
+	bool warned_missing = false;
 
-	dfsync_node_detect();
+	msleep(boot_delay_ms);
 
 	while (!kthread_should_stop()) {
 		int current_state = -1;
 		char buf[32];
+
+		/* Keep retrying detection until a node shows up -- panel/
+		 * backlight drivers on some platforms probe late, so a
+		 * single attempt at thread start can miss a node that
+		 * appears seconds later. Retrying costs nothing once
+		 * found (this branch is skipped every loop after). */
+		if (!dpms_available && !backlight_available) {
+			dfsync_node_detect();
+			if (!dpms_available && !backlight_available) {
+				if (!warned_missing) {
+					pr_warn("dynamic_fsync: no display-state node yet, retrying every %d ms (fsync active until found)\n",
+						poll_interval_ms);
+					warned_missing = true;
+				}
+				msleep_interruptible(poll_interval_ms);
+				continue;
+			}
+			pr_info("dynamic_fsync: display-state node found after retry\n");
+		}
 
 		if (dpms_available && dfsync_read_file(dpms_path, buf, sizeof(buf)) > 0) {
 			current_state = strstr(buf, "On") ? 1 : 0;
