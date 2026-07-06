@@ -1,41 +1,34 @@
-name: Setup Wild KSU
-description: Download and configure Wild KSU with version tracking
+name: Setup KOWSU
+description: Download and configure KOWSU (KOWX712/KernelSU) with version tracking
 inputs:
   ksu_branch:
-    description: 'KernelSU branch or commit (empty = latest dev-susfs branch tip)'
+    description: 'KOWSU branch, tag, or commit (empty = latest tagged version, per setup.sh default)'
     required: false
     default: ""
 
 runs:
   using: composite
   steps:
-    - name: Download Wild KSU
+    - name: Download KOWSU
       shell: bash
       working-directory: ${{ github.workspace }}/kernel
       run: |
         set -euo pipefail
 
-        KSU_REPO="https://github.com/pershoot/KernelSU-Next.git"
+        # KOWSU's own kernel/setup.sh does a full `git clone` (no
+        # --depth), so every branch/tag/commit is already available
+        # locally -- no separate fetch/ls-remote step needed. Its
+        # setup_kernelsu() already handles "$1" being a branch, tag,
+        # commit, or empty (falls back to latest tag) via a single
+        # `git checkout "$1"`, so we just pass ksu_branch straight
+        # through.
         KSU_INPUT="${{ inputs.ksu_branch }}"
-        if [ -z "$KSU_INPUT" ]; then
-          KSU_INPUT="dev-susfs"
-        fi
 
-        # Try as branch first, fall back to commit
-        if git ls-remote --heads "$KSU_REPO" "$KSU_INPUT" | grep -q .; then
-          echo "Using KernelSU-Next branch: $KSU_INPUT"
-          curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/dev-susfs/kernel/setup.sh" | bash -s dev-susfs
-          git -C KernelSU-Next/kernel fetch --depth=50 origin "$KSU_INPUT"
-          git -C KernelSU-Next/kernel checkout "origin/$KSU_INPUT"
-        else
-          echo "Using KernelSU-Next commit: $KSU_INPUT"
-          curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/dev-susfs/kernel/setup.sh" | bash -s dev-susfs
-          git -C KernelSU-Next/kernel fetch --depth=50 origin "$KSU_INPUT"
-          git -C KernelSU-Next/kernel checkout "$KSU_INPUT"
-        fi
+        echo "Using KOWSU ref: ${KSU_INPUT:-<latest tag>}"
+        curl -LSs "https://raw.githubusercontent.com/KOWX712/KernelSU/master/kernel/setup.sh" | bash -s "$KSU_INPUT"
 
-        cd KernelSU-Next/kernel
-        
+        cd KernelSU/kernel
+
         COMMITS_COUNT=$(/usr/bin/git rev-list --count HEAD)
         BASE_VERSION=30000
         KSU_VERSION=$(expr $COMMITS_COUNT "+" $BASE_VERSION)
@@ -43,31 +36,36 @@ runs:
 
         KSU_GIT_TAG="$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.1")"
         sed -i "s/^KSU_VERSION_TAG_FALLBACK := v0.0.1$/KSU_VERSION_TAG_FALLBACK := ${KSU_GIT_TAG}/" Kbuild
-    
+
     - name: Extract KSU Version Info
       id: ksu-version
       shell: bash
-      working-directory: ${{ github.workspace }}/kernel/KernelSU-Next
+      working-directory: ${{ github.workspace }}/kernel/KernelSU
       run: |
-        # Fetch dev branch for version info (tags, commits, etc.)
-        git fetch --depth=50 origin dev 2>/dev/null || true
-        
-        # Extract and export KSU version info from dev branch
-        KSU_GIT_VERSION=$(git rev-list --count origin/dev 2>/dev/null)
-        KSU_GIT_TAG=$(git describe --tags --abbrev=0 origin/dev 2>/dev/null || echo "")
-        KSU_COMMIT=$(git rev-parse --short origin/dev 2>/dev/null)
+        # Full clone already has everything; read version info off
+        # whatever ref setup.sh actually checked out (HEAD), rather
+        # than assuming a separate "dev" branch exists like the old
+        # KernelSU-Next-based version of this action did.
+        KSU_GIT_VERSION=$(git rev-list --count HEAD 2>/dev/null)
+        KSU_GIT_TAG=$(git describe --tags --abbrev=0 HEAD 2>/dev/null || echo "")
+        KSU_COMMIT=$(git rev-parse --short HEAD 2>/dev/null)
         KSU_VERSION=$((30000 + KSU_GIT_VERSION))
-        
+
         echo "KSU_GIT_TAG=$KSU_GIT_TAG" >> $GITHUB_ENV
         echo "KSU_VERSION=$KSU_VERSION" >> $GITHUB_ENV
         echo "KSU_COMMIT=$KSU_COMMIT" >> $GITHUB_ENV
 
-    - name: 'Fix KernelSU-Next'
+    - name: 'Fix KOWSU'
       shell: bash
-      working-directory: ${{ github.workspace }}/kernel/KernelSU-Next
+      working-directory: ${{ github.workspace }}/kernel/KernelSU
       run: |
         set -euo pipefail
-        cp ${{ github.action_path }}/patches/static.patch "${{ github.workspace }}/kernel/KernelSU-Next/static.patch"
+        # Confirmed against KOWSU's actual selinux_hide.c: the three
+        # targeted function signatures match the patch's context
+        # lines exactly (only a harmless `static bool` vs `bool`
+        # context-line difference two lines above, which patch's
+        # fuzz-matching tolerates). No changes needed here.
+        cp ${{ github.action_path }}/patches/static.patch "${{ github.workspace }}/kernel/KernelSU/static.patch"
         patch -p1 < static.patch
 
     - name: Enable Kernel Configs
