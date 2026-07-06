@@ -1,3 +1,4 @@
+
 name: 'Build Kernel'
 description: 'Builds kernel using legacy build.sh or Bazel (kleaf)'
 inputs:
@@ -299,8 +300,7 @@ runs:
       # is ever re-enabled), disabling the whole feature with zero
       # build errors. Written inline here instead of a separate patches
       # file so the symbol definition lives next to the step that wires
-      # it in. Insert the source line before the first `endmenu` in
-      # drivers/Kconfig.
+      # it in.
       cat > "$TARGET_DIR/drivers/dynamic_fsync/Kconfig" << 'EOF'
       config DYNAMIC_FSYNC
       	bool "Dynamic fsync (screen-state aware fsync toggle)"
@@ -312,8 +312,17 @@ runs:
       	  dynamic_fsync_driver.c, with MomenToMoiX reconciling screen
       	  state on every poll cycle).
       EOF
+      # Insert the source line right after the top-level
+      # `menu "Device Drivers"` line, which appears exactly once at the
+      # very start of drivers/Kconfig across virtually all kernel
+      # versions. Matching the *first* `endmenu` instead (an earlier
+      # version of this step did) is NOT safe: GKI trees nest a
+      # `menu "Android"` block (for drivers/android/Kconfig) early in
+      # this file, so the first endmenu closes that nested menu, not
+      # the outer one -- landing our source line inside the wrong
+      # submenu.
       if ! grep -q 'source "drivers/dynamic_fsync/Kconfig"' "$TARGET_DIR/drivers/Kconfig"; then
-        sed -i '0,/^endmenu/s||source "drivers/dynamic_fsync/Kconfig"\n&|' "$TARGET_DIR/drivers/Kconfig"
+        sed -i 's|^menu "Device Drivers"$|&\nsource "drivers/dynamic_fsync/Kconfig"|' "$TARGET_DIR/drivers/Kconfig"
       fi
 
       # Defconfig fix: CONFIG_DYNAMIC_FSYNC must be y, otherwise
