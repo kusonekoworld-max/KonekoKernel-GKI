@@ -25,7 +25,7 @@ runs:
         KSU_INPUT="${{ inputs.ksu_branch }}"
 
         echo "Using KOWSU ref: ${KSU_INPUT:-<latest tag>}"
-        curl -LSs "https://raw.githubusercontent.com/KOWX712/KernelSU/master/kernel/setup.sh" | bash -s "$KSU_INPUT"
+        curl -LSs "https://raw.githubusercontent.com/KOWX712/KernelSU/main/kernel/setup.sh" | bash -s "$KSU_INPUT"
 
         cd KernelSU/kernel
 
