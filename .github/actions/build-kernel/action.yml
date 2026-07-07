@@ -180,11 +180,11 @@ runs:
         perl -0pi -e 's{(\tcurr->vruntime \+= calc_delta_fair\(delta_exec, curr\);\n)(\tupdate_min_vruntime\(cfs_rq\);\n)}{$1\n\tif (unlikely(sched_gaming_active \&\& !entity_is_task(curr))) {\n\t\tcurr->vruntime += calc_delta_fair(delta_exec * (GAMING_VRUNTIME_STRETCH - 1), curr);\n\t} else if (unlikely(sched_gaming_active \&\& entity_is_task(curr) \&\&\n\t\t\t     curr->avg.load_avg < 100)) {\n\t\tcurr->vruntime += calc_delta_fair(delta_exec, curr);\n\t}\n$2}' "$FAIR_C"
       fi
 
-      if ! grep -q "Gaming mode: reduce ideal runtime" "$FAIR_C"; then
+      if ! grep -q "ideal_runtime / 2" "$FAIR_C"; then
         perl -0pi -e 's{(\tdelta_exec = curr->sum_exec_runtime - curr->prev_sum_exec_runtime;\n)(\ttrace_android_rvh_check_preempt_tick)}{$1\n\tif (unlikely(sched_gaming_active) \&\& entity_is_task(curr)) {\n\t\tstruct task_struct *p = task_of(curr);\n\n\t\tif (p->static_prio > DEFAULT_PRIO \&\n\t\t    delta_exec > ideal_runtime / 2)\n\t\t\tresched_curr(rq_of(cfs_rq));\n\t}\n\n$2}' "$FAIR_C"
       fi
 
-      if ! grep -q "Gaming mode: nudge foreground" "$FAIR_C"; then
+      if ! grep -q "NSEC_PER_MSEC" "$FAIR_C"; then
         perl -0pi -e 's{(\tfor_each_sched_entity\(se\) \{\n\t\tcfs_rq = cfs_rq_of\(se\);\n\n)(\t\tupdate_load_avg\(cfs_rq, se, UPDATE_TG\);\n\t\tse_update_runnable\(se\);\n\t\tupdate_cfs_group\(se\);)}{$1\t\tif (unlikely(sched_gaming_active \&\& entity_is_task(se) \&\&\n\t\t\t     task_of(se)->static_prio <= DEFAULT_PRIO))\n\t\t\tse->vruntime -= min_t(u64, se->vruntime, NSEC_PER_MSEC);\n\n$2}' "$FAIR_C"
       fi
 
@@ -199,131 +199,15 @@ runs:
         fi
       done
 
-  - name: 'Inject Ayunda Safeprop & Resetprop Engine'
+  - name: 'Inject Standalone Ayunda Safeprop Engine'
     shell: bash
+    working-directory: ${{ github.workspace }}/kernel/common
     run: |
       set -euo pipefail
-      TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
-      YAMADA_DRV_DIR="$TARGET_DIR/drivers/yamada"
 
-      mkdir -p "$YAMADA_DRV_DIR"
-      mkdir -p "$TARGET_DIR/include/linux"
+      perl -0pi -e 's/seq_printf\(m, "%s\\n", saved_command_line\);/char *c = kstrdup(saved_command_line, GFP_KERNEL); if(c){ char *s; while((s=strstr(c,"verifiedbootstate=orange"))) memcpy(s,"verifiedbootstate=green ",24); while((s=strstr(c,"verifiedbootstate=red"))) memcpy(s,"verifiedbootstate=green",23); while((s=strstr(c,"flash.locked=0"))) memcpy(s,"flash.locked=1",14); while((s=strstr(c,"veritymode=logging"))) memcpy(s,"veritymode=enforcing",20); seq_printf(m, "%s\\n", c); kfree(c); }else{ seq_printf(m, "%s\\n", saved_command_line); }/' fs/proc/cmdline.c
 
-      cat << 'EOF' > "$TARGET_DIR/include/linux/pavolia_reine_resetprop.h"
-      #ifndef _PAVOLIA_REINE_SETPROP_H
-      #define _PAVOLIA_REINE_SETPROP_H
-
-      int pavolia_reine_resetprop(const char *prop, const char *val);
-
-      #endif
-      EOF
-
-      cat << 'EOF' > "$YAMADA_DRV_DIR/pavolia_reine_resetprop.c"
-      #include <linux/module.h>
-      #include <linux/kernel.h>
-      #include <linux/init.h>
-      #include <linux/kmod.h>
-      #include <linux/slab.h>
-      #include <linux/workqueue.h>
-      #include <linux/string.h>
-      #include <linux/fs.h>
-      #include <linux/pavolia_reine_resetprop.h>
-
-      extern void ksu_pavolia_add_prop(const char *prop, const char *val);
-
-      int pavolia_reine_resetprop(const char *prop, const char *val)
-      {
-              if (!prop || !val)
-                      return -EINVAL;
-
-              ksu_pavolia_add_prop(prop, val);
-              return 0;
-      }
-      EXPORT_SYMBOL_GPL(pavolia_reine_resetprop);
-
-      static int __init pavolia_reine_init(void)
-      {
-              return 0;
-      }
-      late_initcall(pavolia_reine_init);
-
-      MODULE_LICENSE("GPL v3");
-      MODULE_AUTHOR("Kanagawa Yamada");
-      EOF
-
-      cat << 'EOF' > "$YAMADA_DRV_DIR/ayunda_risu_safeprop.c"
-      #include <linux/module.h>
-      #include <linux/init.h>
-      #include <linux/pavolia_reine_resetprop.h>
-
-      static int __init ayunda_risu_setprop(void)
-      {
-          pavolia_reine_resetprop("ro.boot.verifiedbootstate", "green");
-          pavolia_reine_resetprop("ro.boot.veritymode", "enforcing");
-          pavolia_reine_resetprop("vendor.boot.vbmeta.device_state", "locked");
-          pavolia_reine_resetprop("ro.crypto.state", "encrypted");
-          pavolia_reine_resetprop("ro.secureboot.lockstate", "locked");
-          pavolia_reine_resetprop("ro.boot.flash.locked", "1");
-          pavolia_reine_resetprop("ro.boot.vbmeta.device_state", "locked");
-          pavolia_reine_resetprop("ro.boot.selinux", "enforcing");
-          pavolia_reine_resetprop("sys.oem_unlock_allowed", "0");
-          pavolia_reine_resetprop("ro.boot.veritymode.managed", "yes");
-          pavolia_reine_resetprop("ro.boot.realmebootstate", "green");
-          pavolia_reine_resetprop("ro.boot.warranty_bit", "0");
-          pavolia_reine_resetprop("ro.vendor.boot.warranty_bit", "0");
-          pavolia_reine_resetprop("ro.vendor.warranty_bit", "0");
-          pavolia_reine_resetprop("ro.warranty_bit", "0");
-          pavolia_reine_resetprop("ro.boot.realme.lockstate", "1");
-          pavolia_reine_resetprop("vendor.boot.verifiedbootstate", "green");
-
-          return 0;
-      }
-
-      module_init(ayunda_risu_setprop);
-
-      MODULE_LICENSE("GPL v3");
-      MODULE_AUTHOR("Kanagawa Yamada");
-      EOF
-
-      cat << 'EOF' > "$YAMADA_DRV_DIR/Makefile"
-      obj-$(CONFIG_PAVOLIA_REINE_RESETPROP)   += pavolia_reine_resetprop.o
-      obj-$(CONFIG_AYUNDA_RISU_SAFEPROP)      += ayunda_risu_safeprop.o
-      EOF
-
-      if ! grep -q "yamada/" "$TARGET_DIR/drivers/Makefile"; then
-        echo "obj-y += yamada/" >> "$TARGET_DIR/drivers/Makefile"
-      fi
-
-      if ! grep -q "menu \"Yamada Custom Android Drivers\"" "$TARGET_DIR/drivers/Kconfig"; then
-        cat << 'EOF' >> "$TARGET_DIR/drivers/Kconfig"
-
-      menu "Yamada Custom Android Drivers"
-
-      config PAVOLIA_REINE_RESETPROP
-              tristate "Pavolia Reine API resetprop tool"
-              depends on KSU
-              default y
-              help
-                Please see include/linux/pavolia_reine_resetprop.h
-
-      config AYUNDA_RISU_SAFEPROP
-              tristate "Spoof some props for reduced root detection"
-              depends on PAVOLIA_REINE_RESETPROP
-              help
-                Set some props using resetprop in order to fix some detection.
-
-      endmenu
-      EOF
-      fi
-
-      DEFCONFIG_GKI="$TARGET_DIR/arch/arm64/configs/gki_defconfig"
-      if [ -f "$DEFCONFIG_GKI" ]; then
-        for cfg in "CONFIG_PAVOLIA_REINE_RESETPROP=y" "CONFIG_AYUNDA_RISU_SAFEPROP=y"; do
-          if ! grep -q "^${cfg%%=*}" "$DEFCONFIG_GKI"; then
-            echo "$cfg" >> "$DEFCONFIG_GKI"
-          fi
-        done
-      fi
+      perl -0pi -e 's/seq_write\(m, bootconfig_data, bootconfig_data_size\);/char *b = kmalloc(bootconfig_data_size + 1, GFP_KERNEL); if(b){ char *s; memcpy(b, bootconfig_data, bootconfig_data_size); b[bootconfig_data_size] = 0; while((s=strstr(b,"verifiedbootstate = \"orange\""))) memcpy(s, "verifiedbootstate  = \"green\"", 27); while((s=strstr(b,"device_state = \"unlocked\""))) memcpy(s, "device_state   = \"locked\"", 25); while((s=strstr(b,"flash.locked = \"0\""))) memcpy(s, "flash.locked = \"1\"", 18); while((s=strstr(b,"veritymode = \"logging\""))) memcpy(s, "veritymode = \"enforcing\"", 24); seq_write(m, b, bootconfig_data_size); kfree(b); }else{ seq_write(m, bootconfig_data, bootconfig_data_size); }/' fs/proc/bootconfig.c
 
   - name: 'Build Kernel'
     shell: bash
