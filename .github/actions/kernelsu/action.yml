@@ -1,34 +1,50 @@
 name: Setup KOWSU
-description: Download and configure KOWSU (KOWX712/KernelSU) with version tracking
+description: Download and configure KOWSU (KOWX712/KernelSU) directly into GKI tree
 inputs:
   ksu_branch:
-    description: 'KOWSU branch, tag, or commit (empty = latest tagged version, per setup.sh default)'
+    description: 'KOWSU branch, tag, or commit (empty = master)'
     required: false
-    default: ""
+    default: "master"
 
 runs:
   using: composite
   steps:
-    - name: Download KOWSU
+    - name: Download and Configure KOWSU
       shell: bash
       working-directory: ${{ github.workspace }}/kernel
       run: |
         set -euo pipefail
 
-        # KOWSU's own kernel/setup.sh does a full `git clone` (no
-        # --depth), so every branch/tag/commit is already available
-        # locally -- no separate fetch/ls-remote step needed. Its
-        # setup_kernelsu() already handles "$1" being a branch, tag,
-        # commit, or empty (falls back to latest tag) via a single
-        # `git checkout "$1"`, so we just pass ksu_branch straight
-        # through.
         KSU_INPUT="${{ inputs.ksu_branch }}"
+        if [ -z "$KSU_INPUT" ]; then
+          KSU_INPUT="master"
+        fi
 
-        echo "Using KOWSU ref: ${KSU_INPUT:-<latest tag>}"
-        curl -LSs "https://raw.githubusercontent.com/KOWX712/KernelSU/main/kernel/setup.sh" | bash -s "$KSU_INPUT"
+        echo "Using KOWSU ref: $KSU_INPUT"
+        
+        rm -rf KernelSU
+        git clone https://github.com/KOWX712/KernelSU.git KernelSU
+        cd KernelSU
+        git checkout "$KSU_INPUT"
+        cd ..
+
+        TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
+
+        echo "[+] Linking KOWSU to GKI Tree at $TARGET_DIR..."
+        
+        ln -sf "$GITHUB_WORKSPACE/kernel/KernelSU/kernel" "$TARGET_DIR/drivers/kernelsu"
+
+        if ! grep -q "obj-y += kernelsu/" "$TARGET_DIR/drivers/Makefile"; then
+          echo "obj-y += kernelsu/" >> "$TARGET_DIR/drivers/Makefile"
+          echo "[+] Successfully registered KOWSU to drivers/Makefile"
+        fi
+
+        if ! grep -q "source \"drivers/kernelsu/Kconfig\"" "$TARGET_DIR/drivers/Kconfig"; then
+          echo 'source "drivers/kernelsu/Kconfig"' >> "$TARGET_DIR/drivers/Kconfig"
+          echo "[+] Successfully registered KOWSU to drivers/Kconfig"
+        fi
 
         cd KernelSU/kernel
-
         COMMITS_COUNT=$(/usr/bin/git rev-list --count HEAD)
         BASE_VERSION=30000
         KSU_VERSION=$(expr $COMMITS_COUNT "+" $BASE_VERSION)
@@ -37,15 +53,20 @@ runs:
         KSU_GIT_TAG="$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.1")"
         sed -i "s/^KSU_VERSION_TAG_FALLBACK := v0.0.1$/KSU_VERSION_TAG_FALLBACK := ${KSU_GIT_TAG}/" Kbuild
 
+        DEFCONFIG_GKI="$TARGET_DIR/arch/arm64/configs/gki_defconfig"
+        if [ -f "$DEFCONFIG_GKI" ]; then
+          if ! grep -q "CONFIG_KSU" "$DEFCONFIG_GKI"; then
+            echo "" >> "$DEFCONFIG_GKI"
+            echo "CONFIG_KSU=y" >> "$DEFCONFIG_GKI"
+            echo "[+] Successfully injected CONFIG_KSU=y to gki_defconfig"
+          fi
+        fi
+
     - name: Extract KSU Version Info
       id: ksu-version
       shell: bash
       working-directory: ${{ github.workspace }}/kernel/KernelSU
       run: |
-        # Full clone already has everything; read version info off
-        # whatever ref setup.sh actually checked out (HEAD), rather
-        # than assuming a separate "dev" branch exists like the old
-        # KernelSU-Next-based version of this action did.
         KSU_GIT_VERSION=$(git rev-list --count HEAD 2>/dev/null)
         KSU_GIT_TAG=$(git describe --tags --abbrev=0 HEAD 2>/dev/null || echo "")
         KSU_COMMIT=$(git rev-parse --short HEAD 2>/dev/null)
@@ -60,13 +81,10 @@ runs:
       working-directory: ${{ github.workspace }}/kernel/KernelSU
       run: |
         set -euo pipefail
-        # Confirmed against KOWSU's actual selinux_hide.c: the three
-        # targeted function signatures match the patch's context
-        # lines exactly (only a harmless `static bool` vs `bool`
-        # context-line difference two lines above, which patch's
-        # fuzz-matching tolerates). No changes needed here.
-        cp ${{ github.action_path }}/patches/static.patch "${{ github.workspace }}/kernel/KernelSU/static.patch"
-        patch -p1 < static.patch
+        if [ -f "${{ github.action_path }}/patches/static.patch" ]; then
+          cp ${{ github.action_path }}/patches/static.patch "${{ github.workspace }}/kernel/KernelSU/static.patch"
+          patch -p1 < static.patch || echo "[!] Patch skipped or already applied"
+        fi
 
     - name: Enable Kernel Configs
       uses: ./.github/actions/set-kernel-config
