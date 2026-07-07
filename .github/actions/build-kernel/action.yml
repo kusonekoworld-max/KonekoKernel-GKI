@@ -181,7 +181,7 @@ runs:
       fi
 
       if ! grep -q "Gaming mode: reduce ideal runtime" "$FAIR_C"; then
-        perl -0pi -e 's{(\tdelta_exec = curr->sum_exec_runtime - curr->prev_sum_exec_runtime;\n)(\ttrace_android_rvh_check_preempt_tick)}{$1\n\t/* Gaming mode: reduce ideal runtime for background tasks */\n\tif (unlikely(sched_gaming_active) \&\& entity_is_task(curr)) {\n\t\tstruct task_struct *p = task_of(curr);\n\n\t\tif (p->static_prio > DEFAULT_PRIO \&\&\n\t\t    delta_exec > ideal_runtime / 2)\n\t\t\tresched_curr(rq_of(cfs_rq));\n\t}\n\n$2}' "$FAIR_C"
+        perl -0pi -e 's{(\tdelta_exec = curr->sum_exec_runtime - curr->prev_sum_exec_runtime;\n)(\ttrace_android_rvh_check_preempt_tick)}{$1\n\t/* Gaming mode: reduce ideal runtime for background tasks */\n\tif (unlikely(sched_gaming_active) \&\& entity_is_task(curr)) {\n\t\tstruct task_struct *p = task_of(curr);\n\n\t\tif (p->static_prio > DEFAULT_PRIO \&\n\t\t    delta_exec > ideal_runtime / 2)\n\t\t\tresched_curr(rq_of(cfs_rq));\n\t}\n\n$2}' "$FAIR_C"
       fi
 
       if ! grep -q "Gaming mode: nudge foreground" "$FAIR_C"; then
@@ -189,7 +189,7 @@ runs:
       fi
 
       if ! grep -q "Gaming task isolation" "$FAIR_C"; then
-        perl -0pi -e 's{(\tdelta = rq_clock_task\(env->src_rq\) - p->se\.exec_start;\n\n)(\treturn delta < \(s64\)sysctl_sched_migration_cost;\n\}\n)}{$1\t/* Gaming task isolation + anti-thrash. Keep heavy render/game\n\t * threads off a smaller-capacity destination (demoting to LITTLE\n\t * is a common frame-drop source); light tasks stay migratable.\n\t * Bias only, not a hard pin -- active balance can still move it.\n\t */\n\tif (sched_gaming_active) {\n\t\tif (capacity_orig_of(env->dst_cpu) < capacity_orig_of(env->src_cpu) \&\&\n\t\t    task_util(p) > (capacity_orig_of(env->src_cpu) >> 3))\n\t\t\treturn 1;\n\t\treturn delta < (s64)sysctl_sched_migration_cost * 2;\n\t}\n\n$2}' "$FAIR_C"
+        perl -0pi -e 's{(\tdelta = rq_clock_task\(env->src_rq\) - p->se\.exec_start;\n\n)(\treturn delta < \(s64\)sysctl_sched_migration_cost;\n\}\n)}{$1\t/* Gaming task isolation + anti-thrash. Keep heavy render/game\n\t * threads off a smaller-capacity destination (demoting to LITTLE\n\t * is a common frame-drop source); light tasks stay migratable.\n\t * Bias only, not a hard pin -- active balance can still move it.\n\t */\n\tif (sched_gaming_active) {\n\t\tif (capacity_orig_of(env->dst_cpu) < capacity_orig_of(env->src_cpu) \&\n\t\t    task_util(p) > (capacity_orig_of(env->src_cpu) >> 3))\n\t\t\treturn 1;\n\t\treturn delta < (s64)sysctl_sched_migration_cost * 2;\n\t}\n\n$2}' "$FAIR_C"
       fi
 
       for MARK in "extern int sched_gaming_active;" "GAMING_VRUNTIME_STRETCH - 1" "Gaming mode: reduce ideal runtime" "Gaming mode: nudge foreground" "Gaming task isolation"; do
@@ -206,153 +206,118 @@ runs:
       TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
       YAMADA_DRV_DIR="$TARGET_DIR/drivers/yamada"
 
-      echo "Creating directories..."
       mkdir -p "$YAMADA_DRV_DIR"
       mkdir -p "$TARGET_DIR/include/linux"
 
-      # 1. Buat Berkas Header API
-      echo "Injecting pavolia_reine_resetprop.h..."
       cat << 'EOF' > "$TARGET_DIR/include/linux/pavolia_reine_resetprop.h"
-#ifndef _PAVOLIA_REINE_SETPROP_H
-#define _PAVOLIA_REINE_SETPROP_H
+      #ifndef _PAVOLIA_REINE_SETPROP_H
+      #define _PAVOLIA_REINE_SETPROP_H
 
-/**
- * pavolia_reine_resetprop - Queue an Android property to be set via usermodehelper
- * @prop: The property name (e.g. "debug.graphics.game_default_frame_rate.disabled")
- * @val: The property value (e.g. "true")
- *
- * Returns 0 on success, or negative error code.
- */
-int pavolia_reine_resetprop(const char *prop, const char *val);
+      int pavolia_reine_resetprop(const char *prop, const char *val);
 
-#endif /* _PAVOLIA_REINE_SETPROP_H */
-EOF
+      #endif
+      EOF
 
-      # 2. Buat Berkas Core Engine (pavolia_reine_resetprop.c)
-      echo "Injecting pavolia_reine_resetprop.c..."
       cat << 'EOF' > "$YAMADA_DRV_DIR/pavolia_reine_resetprop.c"
-#include <linux/module.h>
-#include <linux/kernel.h>
-#include <linux/init.h>
-#include <linux/kmod.h>
-#include <linux/slab.h>
-#include <linux/workqueue.h>
-#include <linux/string.h>
-#include <linux/fs.h>
-#include <linux/pavolia_reine_resetprop.h>
+      #include <linux/module.h>
+      #include <linux/kernel.h>
+      #include <linux/init.h>
+      #include <linux/kmod.h>
+      #include <linux/slab.h>
+      #include <linux/workqueue.h>
+      #include <linux/string.h>
+      #include <linux/fs.h>
+      #include <linux/pavolia_reine_resetprop.h>
 
-extern void ksu_pavolia_add_prop(const char *prop, const char *val);
+      extern void ksu_pavolia_add_prop(const char *prop, const char *val);
 
-/**
- * pavolia_reine_resetprop - Queues an Android property injection
- * @prop: Property name
- * @val: Property value
- * * Injects it securely by passing it to KernelSU's init.rc hook,
- * which instructs Android init to naturally set the property during boot.
- */
-int pavolia_reine_resetprop(const char *prop, const char *val)
-{
-        if (!prop || !val)
-                return -EINVAL;
+      int pavolia_reine_resetprop(const char *prop, const char *val)
+      {
+              if (!prop || !val)
+                      return -EINVAL;
 
-        /* Hook directly into KernelSU's internal init.rc stream proxy */
-        ksu_pavolia_add_prop(prop, val);
+              ksu_pavolia_add_prop(prop, val);
+              return 0;
+      }
+      EXPORT_SYMBOL_GPL(pavolia_reine_resetprop);
 
-        pr_info("pavolia_reine: Property hooked into KernelSU -> %s = %s\n", prop, val);
+      static int __init pavolia_reine_init(void)
+      {
+              return 0;
+      }
+      late_initcall(pavolia_reine_init);
 
-        return 0;
-}
-EXPORT_SYMBOL_GPL(pavolia_reine_resetprop);
+      MODULE_LICENSE("GPL v3");
+      MODULE_AUTHOR("Kanagawa Yamada");
+      EOF
 
-static int __init pavolia_reine_init(void)
-{
-        pr_info("pavolia_reine: Android Property Injection API initialized.\n");
-        return 0;
-}
-late_initcall(pavolia_reine_init);
-
-MODULE_LICENSE("GPL v3");
-MODULE_AUTHOR("Kanagawa Yamada");
-MODULE_DESCRIPTION("Pavolia Reine Android Property Injector");
-EOF
-
-      # 3. Buat Berkas Spoofing Engine (ayunda_risu_safeprop.c)
-      echo "Injecting ayunda_risu_safeprop.c..."
       cat << 'EOF' > "$YAMADA_DRV_DIR/ayunda_risu_safeprop.c"
-#include <linux/module.h>
-#include <linux/init.h>
-#include <linux/pavolia_reine_resetprop.h>
+      #include <linux/module.h>
+      #include <linux/init.h>
+      #include <linux/pavolia_reine_resetprop.h>
 
-static int __init ayunda_risu_setprop(void)
-{
-    pavolia_reine_resetprop("ro.boot.verifiedbootstate", "green");
-    pavolia_reine_resetprop("ro.boot.veritymode", "enforcing");
-    pavolia_reine_resetprop("vendor.boot.vbmeta.device_state", "locked");
-    pavolia_reine_resetprop("ro.crypto.state", "encrypted");
-    pavolia_reine_resetprop("ro.secureboot.lockstate", "locked");
-    pavolia_reine_resetprop("ro.boot.flash.locked", "1");
-    pavolia_reine_resetprop("ro.boot.vbmeta.device_state", "locked");
-    pavolia_reine_resetprop("ro.boot.selinux", "enforcing");
-    pavolia_reine_resetprop("sys.oem_unlock_allowed", "0");
-    pavolia_reine_resetprop("ro.boot.veritymode.managed", "yes");
-    pavolia_reine_resetprop("ro.boot.realmebootstate", "green");
-    pavolia_reine_resetprop("ro.boot.warranty_bit", "0");
-    pavolia_reine_resetprop("ro.vendor.boot.warranty_bit", "0");
-    pavolia_reine_resetprop("ro.vendor.warranty_bit", "0");
-    pavolia_reine_resetprop("ro.warranty_bit", "0");
-    pavolia_reine_resetprop("ro.boot.realme.lockstate", "1");
-    pavolia_reine_resetprop("vendor.boot.verifiedbootstate", "green");
+      static int __init ayunda_risu_setprop(void)
+      {
+          pavolia_reine_resetprop("ro.boot.verifiedbootstate", "green");
+          pavolia_reine_resetprop("ro.boot.veritymode", "enforcing");
+          pavolia_reine_resetprop("vendor.boot.vbmeta.device_state", "locked");
+          pavolia_reine_resetprop("ro.crypto.state", "encrypted");
+          pavolia_reine_resetprop("ro.secureboot.lockstate", "locked");
+          pavolia_reine_resetprop("ro.boot.flash.locked", "1");
+          pavolia_reine_resetprop("ro.boot.vbmeta.device_state", "locked");
+          pavolia_reine_resetprop("ro.boot.selinux", "enforcing");
+          pavolia_reine_resetprop("sys.oem_unlock_allowed", "0");
+          pavolia_reine_resetprop("ro.boot.veritymode.managed", "yes");
+          pavolia_reine_resetprop("ro.boot.realmebootstate", "green");
+          pavolia_reine_resetprop("ro.boot.warranty_bit", "0");
+          pavolia_reine_resetprop("ro.vendor.boot.warranty_bit", "0");
+          pavolia_reine_resetprop("ro.vendor.warranty_bit", "0");
+          pavolia_reine_resetprop("ro.warranty_bit", "0");
+          pavolia_reine_resetprop("ro.boot.realme.lockstate", "1");
+          pavolia_reine_resetprop("vendor.boot.verifiedbootstate", "green");
 
-    return 0;
-}
+          return 0;
+      }
 
-module_init(ayunda_risu_setprop);
+      module_init(ayunda_risu_setprop);
 
-MODULE_LICENSE("GPL v3");
-MODULE_AUTHOR("Kanagawa Yamada");
-MODULE_DESCRIPTION("Spoof some props for reduced root detection");
-EOF
+      MODULE_LICENSE("GPL v3");
+      MODULE_AUTHOR("Kanagawa Yamada");
+      EOF
 
-      # 4. Buat Berkas Makefile internal (Hanya kompilasi Ayunda + Reine)
-      echo "Creating drivers/yamada/Makefile..."
       cat << 'EOF' > "$YAMADA_DRV_DIR/Makefile"
-obj-$(CONFIG_PAVOLIA_REINE_RESETPROP)   += pavolia_reine_resetprop.o
-obj-$(CONFIG_AYUNDA_RISU_SAFEPROP)      += ayunda_risu_safeprop.o
-EOF
+      obj-$(CONFIG_PAVOLIA_REINE_RESETPROP)   += pavolia_reine_resetprop.o
+      obj-$(CONFIG_AYUNDA_RISU_SAFEPROP)      += ayunda_risu_safeprop.o
+      EOF
 
-      # 5. Daftarkan folder yamada ke berkas global drivers/Makefile
       if ! grep -q "yamada/" "$TARGET_DIR/drivers/Makefile"; then
         echo "obj-y += yamada/" >> "$TARGET_DIR/drivers/Makefile"
       fi
 
-      # 6. Suntikkan menu Kconfig murni tanpa modul lain
       if ! grep -q "menu \"Yamada Custom Android Drivers\"" "$TARGET_DIR/drivers/Kconfig"; then
-        echo "Injecting Ayunda Drivers Kconfig menu..."
         cat << 'EOF' >> "$TARGET_DIR/drivers/Kconfig"
 
-menu "Yamada Custom Android Drivers"
+      menu "Yamada Custom Android Drivers"
 
-config PAVOLIA_REINE_RESETPROP
-        tristate "Pavolia Reine API resetprop tool"
-        depends on KSU
-        default y
-        help
-          Please see include/linux/pavolia_reine_resetprop.h
+      config PAVOLIA_REINE_RESETPROP
+              tristate "Pavolia Reine API resetprop tool"
+              depends on KSU
+              default y
+              help
+                Please see include/linux/pavolia_reine_resetprop.h
 
-config AYUNDA_RISU_SAFEPROP
-        tristate "Spoof some props for reduced root detection"
-        depends on PAVOLIA_REINE_RESETPROP
-        help
-          Set some props using resetprop in order to fix some detection.
+      config AYUNDA_RISU_SAFEPROP
+              tristate "Spoof some props for reduced root detection"
+              depends on PAVOLIA_REINE_RESETPROP
+              help
+                Set some props using resetprop in order to fix some detection.
 
-endmenu
-EOF
+      endmenu
+      EOF
       fi
 
-      # 7. Otomatis aktifkan fitur di gki_defconfig
       DEFCONFIG_GKI="$TARGET_DIR/arch/arm64/configs/gki_defconfig"
       if [ -f "$DEFCONFIG_GKI" ]; then
-        echo "Enabling Ayunda & Reine in gki_defconfig..."
         for cfg in "CONFIG_PAVOLIA_REINE_RESETPROP=y" "CONFIG_AYUNDA_RISU_SAFEPROP=y"; do
           if ! grep -q "^${cfg%%=*}" "$DEFCONFIG_GKI"; then
             echo "$cfg" >> "$DEFCONFIG_GKI"
