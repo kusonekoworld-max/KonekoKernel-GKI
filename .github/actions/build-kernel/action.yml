@@ -34,9 +34,50 @@ runs:
         echo "Bypass hack not applied as per input parameter."
       fi
 
-  - name: Setup Kernel Configs
-    if: false
-    uses: ./.github/actions/set-kernel-config
+  - name: 'Force Inject Performance & Battery Configs'
+    shell: bash
+    working-directory: ${{ github.workspace }}/kernel/common
+    run: |
+      set -euo pipefail
+      DEFCONFIG="arch/arm64/configs/gki_defconfig"
+      
+      echo "Injecting custom configs into $DEFCONFIG..."
+      
+      cat << 'EOF' >> "$DEFCONFIG"
+      CONFIG_ZRAM=m
+      CONFIG_ZRAM_DEF_COMP_ZSTD=y
+      CONFIG_ZSMALLOC=m
+      CONFIG_ZSMALLOC_STAT=y
+      CONFIG_LRU_GEN=y
+      CONFIG_LRU_GEN_ENABLED=y
+      CONFIG_LRU_GEN_STATS=n
+      CONFIG_COMPACTION=y
+      CONFIG_MIGRATION=y
+      CONFIG_KSM=y
+      CONFIG_TRANSPARENT_HUGEPAGE=y
+      CONFIG_IOSCHED_BFQ=y
+      CONFIG_BFQ_GROUP_IOSCHED=y
+      CONFIG_MQ_IOSCHED_DEADLINE=y
+      CONFIG_PREEMPT=y
+      CONFIG_PREEMPT_NONE=n
+      CONFIG_PREEMPT_VOLUNTARY=n
+      CONFIG_HIGH_RES_TIMERS=y
+      CONFIG_TCP_FASTOPEN=y
+      CONFIG_CPU_IDLE=y
+      CONFIG_CPU_IDLE_GOV_MENU=y
+      CONFIG_CPU_IDLE_GOV_TEO=y
+      CONFIG_WQ_POWER_EFFICIENT_DEFAULT=y
+      CONFIG_PM_WAKELOCKS=y
+      CONFIG_PM_WAKELOCKS_LIMIT=100
+      CONFIG_PM_WAKELOCKS_GC=y
+      CONFIG_SUSPEND=y
+      CONFIG_SUSPEND_FREEZER=y
+      CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y
+      CONFIG_ENERGY_MODEL=y
+      CONFIG_SCHED_MC=y
+      CONFIG_NO_HZ_IDLE=y
+      CONFIG_NO_HZ_FULL=n
+      EOF
 
   - name: 'Inject MomenToMoiX Driver'
     shell: bash
@@ -216,12 +257,18 @@ runs:
 
       # Layer 2: Proc FS Cmdline Spoofing (Resilient Regex berdasarkan Nama Fungsi)
       if [ -f "fs/proc/cmdline.c" ]; then
+        # INCLUDE FIX: Tambahkan header slab.h di baris pertama
+        sed -i '1 i\#include <linux/slab.h>' fs/proc/cmdline.c
+        
         perl -0pi -e 's/(static int\s+cmdline_proc_show\s*\(struct seq_file\s*\*m,\s*void\s*\*v\)\s*\{)/$1\n\tchar *c = kstrdup(saved_command_line, GFP_KERNEL);\n\tif(c){\n\t\tchar *s;\n\t\twhile((s=strstr(c,"verifiedbootstate=orange"))) memcpy(s,"verifiedbootstate=green ",24);\n\t\twhile((s=strstr(c,"verifiedbootstate=red"))) memcpy(s,"verifiedbootstate=green",23);\n\t\twhile((s=strstr(c,"flash.locked=0"))) memcpy(s,"flash.locked=1",14);\n\t\twhile((s=strstr(c,"veritymode=logging"))) memcpy(s,"veritymode=enforcing",20);\n\t\tseq_printf(m, "%s\\n", c);\n\t\tkfree(c);\n\t\treturn 0;\n\t}/' fs/proc/cmdline.c
         echo "--> Layer 2 (fs/proc/cmdline.c) patched successfully!"
       fi
 
       # Layer 3: Proc FS Bootconfig Spoofing (Resilient Regex berdasarkan Nama Fungsi)
       if [ -f "fs/proc/bootconfig.c" ]; then
+        # INCLUDE FIX: Tambahkan header slab.h di baris pertama
+        sed -i '1 i\#include <linux/slab.h>' fs/proc/bootconfig.c
+        
         perl -0pi -e 's/(static int\s+bootconfig_proc_show\s*\(struct seq_file\s*\*m,\s*void\s*\*v\)\s*\{)/$1\n\tchar *b = kmalloc(bootconfig_data_size + 1, GFP_KERNEL);\n\tif(b){\n\t\tchar *s;\n\t\tmemcpy(b, bootconfig_data, bootconfig_data_size);\n\t\tb[bootconfig_data_size] = 0;\n\t\twhile((s=strstr(b,"verifiedbootstate = \"orange\""))) memcpy(s, "verifiedbootstate  = \"green\"", 27);\n\t\twhile((s=strstr(b,"device_state = \"unlocked\""))) memcpy(s, "device_state   = \"locked\"", 25);\n\t\twhile((s=strstr(b,"flash.locked = \"0\""))) memcpy(s, "flash.locked = \"1\"", 18);\n\t\twhile((s=strstr(b,"veritymode = \"logging\""))) memcpy(s, "veritymode = \"enforcing\"", 24);\n\t\tseq_write(m, b, bootconfig_data_size);\n\t\tkfree(b);\n\t\treturn 0;\n\t}/' fs/proc/bootconfig.c
         echo "--> Layer 3 (fs/proc/bootconfig.c) patched successfully!"
       fi
