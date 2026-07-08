@@ -9,7 +9,6 @@ inputs:
     required: true
 
 runs:
-  using: composite
   steps:
   - name: '🕒 Record Start Time & Send Telegram Status'
     shell: bash
