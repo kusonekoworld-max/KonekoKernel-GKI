@@ -205,6 +205,9 @@ runs:
     run: |
       set -euo pipefail
 
+      # Drop C89 strictness globally to prevent automated injection errors
+      sed -i 's/-Wdeclaration-after-statement//g' Makefile
+
       # Layer 1: Global Early-Boot Spoofing (Menipu Android Init Sejak Detik Pertama)
       if [ -f "init/main.c" ]; then
         perl -0pi -e 's/(void\s+__init\s+setup_command_line\s*\(char\s*\*command_line\)\s*\{)/$1\n\tchar *ks;\n\twhile((ks=strstr(command_line,"verifiedbootstate=orange"))) memcpy(ks,"verifiedbootstate=green ",24);\n\twhile((ks=strstr(command_line,"verifiedbootstate=red"))) memcpy(ks,"verifiedbootstate=green",23);\n\twhile((ks=strstr(command_line,"flash.locked=0"))) memcpy(ks,"flash.locked=1",14);\n\twhile((ks=strstr(command_line,"veritymode=logging"))) memcpy(ks,"veritymode=enforcing",20);/' init/main.c
@@ -296,4 +299,3 @@ runs:
     run: |
       set -euo pipefail
       cp ${{ github.action_path }}/patches/bypass.patch "${{ github.workspace }}/AnyKernel3/bypass.patch"
-      patch -p1 < bypass.patch
