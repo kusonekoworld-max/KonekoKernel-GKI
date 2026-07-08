@@ -199,6 +199,30 @@ runs:
         fi
       done
 
+  - name: 'Inject Standalone Ayunda Safeprop Engine (v2 - Universal Fail-Safe)'
+    shell: bash
+    working-directory: ${{ github.workspace }}/kernel/common
+    run: |
+      set -euo pipefail
+
+      # Layer 1: Global Early-Boot Spoofing (Menipu Android Init Sejak Detik Pertama)
+      if [ -f "init/main.c" ]; then
+        perl -0pi -e 's/(void\s+__init\s+setup_command_line\s*\(char\s*\*command_line\)\s*\{)/$1\n\tchar *ks;\n\twhile((ks=strstr(command_line,"verifiedbootstate=orange"))) memcpy(ks,"verifiedbootstate=green ",24);\n\twhile((ks=strstr(command_line,"verifiedbootstate=red"))) memcpy(ks,"verifiedbootstate=green",23);\n\twhile((ks=strstr(command_line,"flash.locked=0"))) memcpy(ks,"flash.locked=1",14);\n\twhile((ks=strstr(command_line,"veritymode=logging"))) memcpy(ks,"veritymode=enforcing",20);/' init/main.c
+        echo "--> Layer 1 (init/main.c) patched successfully!"
+      fi
+
+      # Layer 2: Proc FS Cmdline Spoofing (Resilient Regex berdasarkan Nama Fungsi)
+      if [ -f "fs/proc/cmdline.c" ]; then
+        perl -0pi -e 's/(static int\s+cmdline_proc_show\s*\(struct seq_file\s*\*m,\s*void\s*\*v\)\s*\{)/$1\n\tchar *c = kstrdup(saved_command_line, GFP_KERNEL);\n\tif(c){\n\t\tchar *s;\n\t\twhile((s=strstr(c,"verifiedbootstate=orange"))) memcpy(s,"verifiedbootstate=green ",24);\n\t\twhile((s=strstr(c,"verifiedbootstate=red"))) memcpy(s,"verifiedbootstate=green",23);\n\t\twhile((s=strstr(c,"flash.locked=0"))) memcpy(s,"flash.locked=1",14);\n\t\twhile((s=strstr(c,"veritymode=logging"))) memcpy(s,"veritymode=enforcing",20);\n\t\tseq_printf(m, "%s\\n", c);\n\t\tkfree(c);\n\t\treturn 0;\n\t}/' fs/proc/cmdline.c
+        echo "--> Layer 2 (fs/proc/cmdline.c) patched successfully!"
+      fi
+
+      # Layer 3: Proc FS Bootconfig Spoofing (Resilient Regex berdasarkan Nama Fungsi)
+      if [ -f "fs/proc/bootconfig.c" ]; then
+        perl -0pi -e 's/(static int\s+bootconfig_proc_show\s*\(struct seq_file\s*\*m,\s*void\s*\*v\)\s*\{)/$1\n\tchar *b = kmalloc(bootconfig_data_size + 1, GFP_KERNEL);\n\tif(b){\n\t\tchar *s;\n\t\tmemcpy(b, bootconfig_data, bootconfig_data_size);\n\t\tb[bootconfig_data_size] = 0;\n\t\twhile((s=strstr(b,"verifiedbootstate = \"orange\""))) memcpy(s, "verifiedbootstate  = \"green\"", 27);\n\t\twhile((s=strstr(b,"device_state = \"unlocked\""))) memcpy(s, "device_state   = \"locked\"", 25);\n\t\twhile((s=strstr(b,"flash.locked = \"0\""))) memcpy(s, "flash.locked = \"1\"", 18);\n\t\twhile((s=strstr(b,"veritymode = \"logging\""))) memcpy(s, "veritymode = \"enforcing\"", 24);\n\t\tseq_write(m, b, bootconfig_data_size);\n\t\tkfree(b);\n\t\treturn 0;\n\t}/' fs/proc/bootconfig.c
+        echo "--> Layer 3 (fs/proc/bootconfig.c) patched successfully!"
+      fi
+
   - name: 'Build Kernel'
     shell: bash
     working-directory: ${{ github.workspace }}/kernel
