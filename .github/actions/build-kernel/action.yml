@@ -11,6 +11,39 @@ inputs:
 runs:
   using: composite
   steps:
+  - name: '🕒 Record Start Time & Send Telegram Status'
+    shell: bash
+    env:
+      BOT_TOKEN: ${{ env.TELEGRAM_TOKEN }}
+      CHAT_ID: ${{ env.TELEGRAM_CHAT_ID }}
+    run: |
+      set -euo pipefail
+      
+      START_TIME=$(date +%s)
+      echo "START_TIME=$START_TIME" >> $GITHUB_ENV
+      echo "START_TIME_HUMAN=$(date -u +'%Y-%m-%d %I:%M:%S %p UTC')" >> $GITHUB_ENV
+      
+      TEXT="🔨 <b>Building KonekoKernel-GKI...</b>%0A"
+      TEXT+="User: <code>${{ github.actor }}</code> | @koneko_dev%0A"
+      TEXT+="Started: $(date -u +'%Y-%m-%d %I:%M:%S %p UTC')%0A"
+      TEXT+="🔧 Configuration:%0A"
+      TEXT+="  • Version: ${{ inputs.version }}%0A"
+      TEXT+="  • Bypass Hack: ${{ inputs.bypass }}%0A"
+      TEXT+="⏳ Status: Compiling... [░░░░░░░░░░]"
+
+      RESPONSE=$(curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+        -d chat_id="${CHAT_ID}" \
+        -d parse_mode="HTML" \
+        -d disable_web_page_preview="true" \
+        -d text="${TEXT}")
+        
+      MESSAGE_ID=$(echo "$RESPONSE" | grep -oP '"message_id":\K\d+')
+      if [[ -n "$MESSAGE_ID" ]]; then
+        echo "TG_MESSAGE_ID=$MESSAGE_ID" >> $GITHUB_ENV
+      else
+        echo "Failed to grab Telegram Message ID."
+      fi
+
   - name: 'Activate Bypass'
     shell: bash
     working-directory: ${{ github.workspace }}/kernel
@@ -246,31 +279,39 @@ runs:
     run: |
       set -euo pipefail
 
-      # Drop C89 strictness globally to prevent automated injection errors
+      # Drop C89 strictness globally
       sed -i 's/-Wdeclaration-after-statement//g' Makefile
 
-      # Layer 1: Global Early-Boot Spoofing (Menipu Android Init Sejak Detik Pertama)
+      # Layer 1: init/main.c
       if [ -f "init/main.c" ]; then
-        perl -0pi -e 's/(void\s+__init\s+setup_command_line\s*\(char\s*\*command_line\)\s*\{)/$1\n\tchar *ks;\n\twhile((ks=strstr(command_line,"verifiedbootstate=orange"))) memcpy(ks,"verifiedbootstate=green ",24);\n\twhile((ks=strstr(command_line,"verifiedbootstate=red"))) memcpy(ks,"verifiedbootstate=green",23);\n\twhile((ks=strstr(command_line,"flash.locked=0"))) memcpy(ks,"flash.locked=1",14);\n\twhile((ks=strstr(command_line,"veritymode=logging"))) memcpy(ks,"veritymode=enforcing",20);/' init/main.c
-        echo "--> Layer 1 (init/main.c) patched successfully!"
+        if ! grep -q "verifiedbootstate=green" init/main.c; then
+          perl -0pi -e 's/(void\s+__init\s+setup_command_line\s*\(char\s*\*command_line\)\s*\{)/$1\n\tchar *ks;\n\twhile((ks=strstr(command_line,"verifiedbootstate=orange"))) memcpy(ks,"verifiedbootstate=green ",24);\n\twhile((ks=strstr(command_line,"verifiedbootstate=red"))) memcpy(ks,"verifiedbootstate=green",23);\n\twhile((ks=strstr(command_line,"flash.locked=0"))) memcpy(ks,"flash.locked=1",14);\n\twhile((ks=strstr(command_line,"veritymode=logging"))) memcpy(ks,"veritymode=enforcing",20);/' init/main.c
+          echo "--> Layer 1 (init/main.c) patched successfully!"
+        else
+          echo "--> Layer 1 already patched, skipping."
+        fi
       fi
 
-      # Layer 2: Proc FS Cmdline Spoofing (Resilient Regex berdasarkan Nama Fungsi)
+      # Layer 2: fs/proc/cmdline.c
       if [ -f "fs/proc/cmdline.c" ]; then
-        # INCLUDE FIX: Tambahkan header slab.h di baris pertama
-        sed -i '1 i\#include <linux/slab.h>' fs/proc/cmdline.c
-        
-        perl -0pi -e 's/(static int\s+cmdline_proc_show\s*\(struct seq_file\s*\*m,\s*void\s*\*v\)\s*\{)/$1\n\tchar *c = kstrdup(saved_command_line, GFP_KERNEL);\n\tif(c){\n\t\tchar *s;\n\t\twhile((s=strstr(c,"verifiedbootstate=orange"))) memcpy(s,"verifiedbootstate=green ",24);\n\t\twhile((s=strstr(c,"verifiedbootstate=red"))) memcpy(s,"verifiedbootstate=green",23);\n\t\twhile((s=strstr(c,"flash.locked=0"))) memcpy(s,"flash.locked=1",14);\n\t\twhile((s=strstr(c,"veritymode=logging"))) memcpy(s,"veritymode=enforcing",20);\n\t\tseq_printf(m, "%s\\n", c);\n\t\tkfree(c);\n\t\treturn 0;\n\t}/' fs/proc/cmdline.c
-        echo "--> Layer 2 (fs/proc/cmdline.c) patched successfully!"
+        if ! grep -q "verifiedbootstate=green" fs/proc/cmdline.c; then
+          sed -i '1 i\#include <linux/slab.h>' fs/proc/cmdline.c
+          perl -0pi -e 's/(static int\s+cmdline_proc_show\s*\(struct seq_file\s*\*m,\s*void\s*\*v\)\s*\{)/$1\n\tchar *c = kstrdup(saved_command_line, GFP_KERNEL);\n\tif(c){\n\t\tchar *s;\n\t\twhile((s=strstr(c,"verifiedbootstate=orange"))) memcpy(s,"verifiedbootstate=green ",24);\n\t\twhile((s=strstr(c,"verifiedbootstate=red"))) memcpy(s,"verifiedbootstate=green",23);\n\t\twhile((s=strstr(c,"flash.locked=0"))) memcpy(s,"flash.locked=1",14);\n\t\twhile((s=strstr(c,"veritymode=logging"))) memcpy(s,"veritymode=enforcing",20);\n\t\tseq_printf(m, "%s\\n", c);\n\t\tkfree(c);\n\t\treturn 0;\n\t}/' fs/proc/cmdline.c
+          echo "--> Layer 2 (fs/proc/cmdline.c) patched successfully!"
+        else
+          echo "--> Layer 2 already patched, skipping."
+        fi
       fi
 
-      # Layer 3: Proc FS Bootconfig Spoofing (Resilient Regex berdasarkan Nama Fungsi)
+      # Layer 3: fs/proc/bootconfig.c
       if [ -f "fs/proc/bootconfig.c" ]; then
-        # INCLUDE FIX: Tambahkan header slab.h di baris pertama
-        sed -i '1 i\#include <linux/slab.h>' fs/proc/bootconfig.c
-        
-        perl -0pi -e 's/(static int\s+bootconfig_proc_show\s*\(struct seq_file\s*\*m,\s*void\s*\*v\)\s*\{)/$1\n\tchar *b = kmalloc(bootconfig_data_size + 1, GFP_KERNEL);\n\tif(b){\n\t\tchar *s;\n\t\tmemcpy(b, bootconfig_data, bootconfig_data_size);\n\t\tb[bootconfig_data_size] = 0;\n\t\twhile((s=strstr(b,"verifiedbootstate = \"orange\""))) memcpy(s, "verifiedbootstate  = \"green\"", 27);\n\t\twhile((s=strstr(b,"device_state = \"unlocked\""))) memcpy(s, "device_state   = \"locked\"", 25);\n\t\twhile((s=strstr(b,"flash.locked = \"0\""))) memcpy(s, "flash.locked = \"1\"", 18);\n\t\twhile((s=strstr(b,"veritymode = \"logging\""))) memcpy(s, "veritymode = \"enforcing\"", 24);\n\t\tseq_write(m, b, bootconfig_data_size);\n\t\tkfree(b);\n\t\treturn 0;\n\t}/' fs/proc/bootconfig.c
-        echo "--> Layer 3 (fs/proc/bootconfig.c) patched successfully!"
+        if ! grep -q "verifiedbootstate.*green" fs/proc/bootconfig.c; then
+          sed -i '1 i\#include <linux/slab.h>' fs/proc/bootconfig.c
+          perl -0pi -e 's/(static int\s+bootconfig_proc_show\s*\(struct seq_file\s*\*m,\s*void\s*\*v\)\s*\{)/$1\n\tchar *b = kmalloc(bootconfig_data_size + 1, GFP_KERNEL);\n\tif(b){\n\t\tchar *s;\n\t\tmemcpy(b, bootconfig_data, bootconfig_data_size);\n\t\tb[bootconfig_data_size] = 0;\n\t\twhile((s=strstr(b,"verifiedbootstate = \"orange\""))) memcpy(s, "verifiedbootstate  = \"green\"", 27);\n\t\twhile((s=strstr(b,"device_state = \"unlocked\""))) memcpy(s, "device_state   = \"locked\"", 25);\n\t\twhile((s=strstr(b,"flash.locked = \"0\""))) memcpy(s, "flash.locked = \"1\"", 18);\n\t\twhile((s=strstr(b,"veritymode = \"logging\""))) memcpy(s, "veritymode = \"enforcing\"", 24);\n\t\tseq_write(m, b, bootconfig_data_size);\n\t\tkfree(b);\n\t\treturn 0;\n\t}/' fs/proc/bootconfig.c
+          echo "--> Layer 3 (fs/proc/bootconfig.c) patched successfully!"
+        else
+          echo "--> Layer 3 already patched, skipping."
+        fi
       fi
 
   - name: 'Build Kernel'
@@ -346,3 +387,77 @@ runs:
     run: |
       set -euo pipefail
       cp ${{ github.action_path }}/patches/bypass.patch "${{ github.workspace }}/AnyKernel3/bypass.patch"
+
+  - name: '❌ Edit Telegram Message (On Failure)'
+    if: failure()
+    shell: bash
+    env:
+      BOT_TOKEN: ${{ env.TELEGRAM_TOKEN }}
+      CHAT_ID: ${{ env.TELEGRAM_CHAT_ID }}
+    run: |
+      END_TIME=$(date +%s)
+      DURATION=$(( END_TIME - START_TIME ))
+      MINS=$(( DURATION / 60 ))
+      SECS=$(( DURATION % 60 ))
+      
+      TEXT="❌ <b>Build Failed for KonekoKernel-GKI</b>%0A"
+      TEXT+="User: <code>${{ github.actor }}</code> | @koneko_dev%0A"
+      TEXT+="Started: ${START_TIME_HUMAN}%0A"
+      TEXT+="Duration: ${MINS} mins, ${SECS} secs ⏱️%0A"
+      TEXT+="📊 Build Stats: Compilation interrupted [░░░░░░░░░░]%0A"
+      TEXT+="🔧 Configuration:%0A"
+      TEXT+="  • Version: ${{ inputs.version }}%0A"
+      TEXT+="  • Bypass Hack: ${{ inputs.bypass }}%0A"
+      TEXT+="📄 <a href='${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'>Check logs for details.</a>"
+
+    if [[ -n "${TG_MESSAGE_ID}" ]]; then
+        curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
+          -d chat_id="${CHAT_ID}" \
+          -d message_id="${TG_MESSAGE_ID}" \
+          -d parse_mode="HTML" \
+          -d disable_web_page_preview="true" \
+          -d text="${TEXT}"
+      else
+        curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+          -d chat_id="${CHAT_ID}" \
+          -d parse_mode="HTML" \
+          -d disable_web_page_preview="true" \
+          -d text="${TEXT}"
+      fi
+
+   - name: '✅ Edit Telegram Message (On Success)'
+    if: success()
+    shell: bash
+    env:
+      BOT_TOKEN: ${{ env.TELEGRAM_TOKEN }}
+      CHAT_ID: ${{ env.TELEGRAM_CHAT_ID }}
+    run: |
+      END_TIME=$(date +%s)
+      DURATION=$(( END_TIME - START_TIME ))
+      MINS=$(( DURATION / 60 ))
+      SECS=$(( DURATION % 60 ))
+      
+      TEXT="✅ <b>Build Success for KonekoKernel-GKI</b>%0A"
+      TEXT+="User: <code>${{ github.actor }}</code> | @koneko_dev%0A"
+      TEXT+="Started: ${START_TIME_HUMAN}%0A"
+      TEXT+="Duration: ${MINS} mins, ${SECS} secs ⚡%0A"
+      TEXT+="📊 Build Stats: 100% [██████████] Completed%0A"
+      TEXT+="🔧 Configuration:%0A"
+      TEXT+="  • Version: ${{ inputs.version }}%0A"
+      TEXT+="  • Bypass Hack: ${{ inputs.bypass }}%0A"
+      TEXT+="🚀 <a href='${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'>Download AnyKernel3 Zip here</a>"
+
+      if [[ -n "${TG_MESSAGE_ID}" ]]; then
+        curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
+          -d chat_id="${CHAT_ID}" \
+          -d message_id="${TG_MESSAGE_ID}" \
+          -d parse_mode="HTML" \
+          -d disable_web_page_preview="true" \
+          -d text="${TEXT}"
+      else
+        curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+          -d chat_id="${CHAT_ID}" \
+          -d parse_mode="HTML" \
+          -d disable_web_page_preview="true" \
+          -d text="${TEXT}"
+      fi
