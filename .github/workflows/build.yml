@@ -306,8 +306,6 @@ jobs:
       env:
         SOURCE_DATE_EPOCH: ${{ env.SOURCE_DATE_EPOCH }}
         KBUILD_BUILD_TIMESTAMP: ${{ env.KBUILD_BUILD_TIMESTAMP }}
-        TELEGRAM_TOKEN: "8920570290:AAGb1Gt3mny8AJjS7uqnTSPldYGhxLCuOCI"
-        TELEGRAM_CHAT_ID: "5148890" 
       uses: ./.github/actions/build-kernel
       with:
         version: ${{ inputs.version }}
