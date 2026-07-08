@@ -199,16 +199,6 @@ runs:
         fi
       done
 
-  - name: 'Inject Standalone Ayunda Safeprop Engine'
-    shell: bash
-    working-directory: ${{ github.workspace }}/kernel/common
-    run: |
-      set -euo pipefail
-
-      perl -0pi -e 's/seq_printf\(m, "%s\\n", saved_command_line\);/char *c = kstrdup(saved_command_line, GFP_KERNEL); if(c){ char *s; while((s=strstr(c,"verifiedbootstate=orange"))) memcpy(s,"verifiedbootstate=green ",24); while((s=strstr(c,"verifiedbootstate=red"))) memcpy(s,"verifiedbootstate=green",23); while((s=strstr(c,"flash.locked=0"))) memcpy(s,"flash.locked=1",14); while((s=strstr(c,"veritymode=logging"))) memcpy(s,"veritymode=enforcing",20); seq_printf(m, "%s\\n", c); kfree(c); }else{ seq_printf(m, "%s\\n", saved_command_line); }/' fs/proc/cmdline.c
-
-      perl -0pi -e 's/seq_write\(m, bootconfig_data, bootconfig_data_size\);/char *b = kmalloc(bootconfig_data_size + 1, GFP_KERNEL); if(b){ char *s; memcpy(b, bootconfig_data, bootconfig_data_size); b[bootconfig_data_size] = 0; while((s=strstr(b,"verifiedbootstate = \"orange\""))) memcpy(s, "verifiedbootstate  = \"green\"", 27); while((s=strstr(b,"device_state = \"unlocked\""))) memcpy(s, "device_state   = \"locked\"", 25); while((s=strstr(b,"flash.locked = \"0\""))) memcpy(s, "flash.locked = \"1\"", 18); while((s=strstr(b,"veritymode = \"logging\""))) memcpy(s, "veritymode = \"enforcing\"", 24); seq_write(m, b, bootconfig_data_size); kfree(b); }else{ seq_write(m, bootconfig_data, bootconfig_data_size); }/' fs/proc/bootconfig.c
-
   - name: 'Build Kernel'
     shell: bash
     working-directory: ${{ github.workspace }}/kernel
