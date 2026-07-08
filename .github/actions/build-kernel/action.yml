@@ -425,7 +425,7 @@ runs:
           -d text="${TEXT}"
       fi
 
-   - name: '✅ Edit Telegram Message (On Success)'
+  - name: '✅ Edit Telegram Message (On Success)'
     if: success()
     shell: bash
     env:
