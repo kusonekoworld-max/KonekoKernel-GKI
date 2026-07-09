@@ -249,7 +249,11 @@ runs:
         # Layer 1: init/main.c
         if [ -f "init/main.c" ]; then
           if ! grep -q "verifiedbootstate=green" init/main.c; then
-            perl -0pi -e 's/(void\s+__init\s+setup_command_line\s*\(char\s*\*command_line\)\s*\{)/$1\n\tchar *ks;\n\twhile((ks=strstr(command_line,"verifiedbootstate=orange"))) memcpy(ks,"verifiedbootstate=green ",24);\n\twhile((ks=strstr(command_line,"verifiedbootstate=red"))) memcpy(ks,"verifiedbootstate=green",23);\n\twhile((ks=strstr(command_line,"flash.locked=0"))) memcpy(ks,"flash.locked=1",14);\n\twhile((ks=strstr(command_line,"veritymode=logging"))) memcpy(ks,"veritymode=enforcing",20);/' init/main.c
+            perl -0pi -e 's/(static void __init setup_command_line\(char \*command_line\)\n\{\n\tsize_t len, xlen = 0, ilen = 0;\n)/$1\n\t{\n\t\tchar *ks;\n\t\twhile((ks=strstr(command_line,"verifiedbootstate=orange"))) memcpy(ks,"verifiedbootstate=green ",24);\n\t\twhile((ks=strstr(command_line,"verifiedbootstate=red"))) memcpy(ks,"verifiedbootstate=green",23);\n\t\twhile((ks=strstr(command_line,"flash.locked=0"))) memcpy(ks,"flash.locked=1",14);\n\t\twhile((ks=strstr(command_line,"veritymode=logging"))) memcpy(ks,"veritymode=enforcing",20);\n\t}\n/' init/main.c
+            if ! grep -q "verifiedbootstate=green" init/main.c; then
+              echo "ERROR: Layer 1 injection failed" >&2
+              exit 1
+            fi
             echo "--> Layer 1 (init/main.c) patched successfully!"
           else
             echo "--> Layer 1 already patched, skipping."
