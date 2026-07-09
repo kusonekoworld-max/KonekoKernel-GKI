@@ -8,346 +8,349 @@ inputs:
     description: 'Kernel config version (e.g., android14-6.1)'
     required: true
 
-  - name: 'Activate Bypass'
-    shell: bash
-    working-directory: ${{ github.workspace }}/kernel
-    run: |
-      set -euo pipefail
-      if [ "${{ inputs.bypass }}" = "true" ]; then
-        if [[ ${{ inputs.version }} == "android14-6.1" || ${{ inputs.version }} == "android15-6.6" || ${{ inputs.version }} == "android16-6.12" ]]; then
-          TARGET_FILE="${{ github.workspace }}/kernel/common/kernel/module/version.c"
-        else
-          TARGET_FILE="${{ github.workspace }}/kernel/common/kernel/module.c"
-        fi
-
-        sed -i '/bad_version:/{:a;n;/return 0;/{s/return 0;/return 1;/;b};ba}' "$TARGET_FILE"
-
-        if ! grep -A 5 "bad_version:" "$TARGET_FILE" | grep -q "return 1;"; then
-          echo "Patch failed! 'return 1;' not found at bad_version:"
-          grep -A 10 "bad_version:" "$TARGET_FILE" || true
-          exit 1
-        fi
-      else
-        echo "Bypass hack not applied as per input parameter."
-      fi
-
-  - name: 'Force Inject Performance & Battery Configs'
-    shell: bash
-    working-directory: ${{ github.workspace }}/kernel/common
-    run: |
-      set -euo pipefail
-      DEFCONFIG="arch/arm64/configs/gki_defconfig"
-      
-      echo "Injecting custom configs into $DEFCONFIG..."
-      
-      cat << 'EOF' >> "$DEFCONFIG"
-      CONFIG_ZRAM=m
-      CONFIG_ZRAM_DEF_COMP_ZSTD=y
-      CONFIG_ZSMALLOC=m
-      CONFIG_ZSMALLOC_STAT=y
-      CONFIG_LRU_GEN=y
-      CONFIG_LRU_GEN_ENABLED=y
-      CONFIG_LRU_GEN_STATS=n
-      CONFIG_COMPACTION=y
-      CONFIG_MIGRATION=y
-      CONFIG_KSM=y
-      CONFIG_TRANSPARENT_HUGEPAGE=y
-      CONFIG_IOSCHED_BFQ=y
-      CONFIG_BFQ_GROUP_IOSCHED=y
-      CONFIG_MQ_IOSCHED_DEADLINE=y
-      CONFIG_PREEMPT=y
-      CONFIG_PREEMPT_NONE=n
-      CONFIG_PREEMPT_VOLUNTARY=n
-      CONFIG_HIGH_RES_TIMERS=y
-      CONFIG_TCP_FASTOPEN=y
-      CONFIG_CPU_IDLE=y
-      CONFIG_CPU_IDLE_GOV_MENU=y
-      CONFIG_CPU_IDLE_GOV_TEO=y
-      CONFIG_WQ_POWER_EFFICIENT_DEFAULT=y
-      CONFIG_PM_WAKELOCKS=y
-      CONFIG_PM_WAKELOCKS_LIMIT=100
-      CONFIG_PM_WAKELOCKS_GC=y
-      CONFIG_SUSPEND=y
-      CONFIG_SUSPEND_FREEZER=y
-      CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y
-      CONFIG_ENERGY_MODEL=y
-      CONFIG_SCHED_MC=y
-      CONFIG_NO_HZ_IDLE=y
-      CONFIG_NO_HZ_FULL=n
-      EOF
-
-  - name: 'Inject MomenToMoiX Driver'
-    shell: bash
-    run: |
-      set -euo pipefail
-      TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
-      mkdir -p "$TARGET_DIR/drivers/momx"
-      cd "${{ github.action_path }}/patches/tenebrion"
-      cp MomenToMoiX.c "$TARGET_DIR/drivers/momx/MomenToMoiX.c"
-      cp Makefile "$TARGET_DIR/drivers/momx/Makefile"
-      cp selinux.sh "$TARGET_DIR/drivers/momx/Sekinux.sh"
-      if ! grep -q "momx/" "$TARGET_DIR/drivers/Makefile"; then
-        echo "obj-y += momx/" >> "$TARGET_DIR/drivers/Makefile"
-      fi
-
-  - name: 'Inject MomenToMoiX SELinux Rules'
-    shell: bash
-    working-directory: ${{ github.workspace }}/kernel/common
-    run: |
-      set -euo pipefail
-      SELINUX_PATCH_PATH="${{ github.action_path }}/patches/tenebrion/selinux.sh"
-      cp "$SELINUX_PATCH_PATH" ./selinux.sh
-      chmod +x ./selinux.sh
-      RULES_FILE=$(find -L drivers/kernelsu -type f -name "rules.c" 2>/dev/null | head -1)
-      if [[ -z "$RULES_FILE" ]]; then
-        RULES_FILE=$(grep -rl "ksu_allow" . --include="rules.c" 2>/dev/null | head -1)
-      fi
-      if [[ -z "$RULES_FILE" ]]; then
-        exit 1
-      fi
-      export SELINUX_RULES_C="$RULES_FILE"
-      ./selinux.sh
-
-  - name: 'Inject Reflex Governor'
-    shell: bash
-    run: |
-      set -euo pipefail
-      TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
-
-      mkdir -p "$TARGET_DIR/kernel/sched"
-      cp "${{ github.action_path }}/patches/reflex/cpufreq_reflex.c" "$TARGET_DIR/kernel/sched/cpufreq_reflex.c"
-
-      if ! grep -q "cpufreq_reflex.o" "$TARGET_DIR/kernel/sched/Makefile"; then
-        echo 'obj-$(CONFIG_CPU_FREQ_GOV_REFLEX) += cpufreq_reflex.o' >> "$TARGET_DIR/kernel/sched/Makefile"
-      fi
-
-      if ! grep -q "config CPU_FREQ_GOV_REFLEX" "$TARGET_DIR/drivers/cpufreq/Kconfig"; then
-        printf "\nconfig CPU_FREQ_GOV_REFLEX\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
-        printf "\ttristate \"'reflex' cpufreq governor\"\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
-        printf "\tdepends on CPU_FREQ && SMP\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
-        printf "\tselect CPU_FREQ_GOV_ATTR_SET\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
-        printf "\thelp\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
-        printf "\t  'reflex' is an advanced CPU frequency governor based on schedutil,\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
-        printf "\t  featuring idle-time accounting and PELT-complementary exponential decay.\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
-      fi
-
-      DEFCONFIG_GKI="$TARGET_DIR/arch/arm64/configs/gki_defconfig"
-      if [ -f "$DEFCONFIG_GKI" ]; then
-        if ! grep -q "CONFIG_CPU_FREQ_GOV_REFLEX" "$DEFCONFIG_GKI"; then
-          echo "CONFIG_CPU_FREQ_GOV_REFLEX=y" >> "$DEFCONFIG_GKI"
-        fi
-      fi
-
-  - name: 'Inject Vorpal Governor + GKI510 Compat'
-    shell: bash
-    run: |
-      set -euo pipefail
-      TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
-
-      mkdir -p "$TARGET_DIR/kernel/sched"
-      cp "${{ github.action_path }}/patches/vorpal/cpufreq_vorpal.c" "$TARGET_DIR/kernel/sched/cpufreq_vorpal.c"
-      cp "${{ github.action_path }}/patches/vorpal/rfx_gki510_compat.c" "$TARGET_DIR/kernel/sched/rfx_gki510_compat.c"
-
-      if ! grep -q "cpufreq_vorpal.o" "$TARGET_DIR/kernel/sched/Makefile"; then
-        echo 'obj-$(CONFIG_CPU_FREQ_GOV_VORPAL) += cpufreq_vorpal.o' >> "$TARGET_DIR/kernel/sched/Makefile"
-      fi
-
-      if ! grep -q "rfx_gki510_compat.o" "$TARGET_DIR/kernel/sched/Makefile"; then
-        echo 'obj-y += rfx_gki510_compat.o' >> "$TARGET_DIR/kernel/sched/Makefile"
-      fi
-
-      if ! grep -q "config CPU_FREQ_GOV_VORPAL" "$TARGET_DIR/drivers/cpufreq/Kconfig"; then
-        printf "\nconfig CPU_FREQ_GOV_VORPAL\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
-        printf "\ttristate \"'vorpal' cpufreq governor\"\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
-        printf "\tdepends on CPU_FREQ && SMP\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
-        printf "\tselect CPU_FREQ_GOV_ATTR_SET\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
-        printf "\thelp\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
-        printf "\t  'vorpal' is a schedutil-based governor tuned for\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
-        printf "\t  gaming/thermal-aware dual-profile operation.\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
-      fi
-
-      DEFCONFIG_GKI="$TARGET_DIR/arch/arm64/configs/gki_defconfig"
-      if [ -f "$DEFCONFIG_GKI" ] && ! grep -q "CONFIG_CPU_FREQ_GOV_VORPAL" "$DEFCONFIG_GKI"; then
-        echo "CONFIG_CPU_FREQ_GOV_VORPAL=y" >> "$DEFCONFIG_GKI"
-      fi
-
-  - name: 'Fix Vorpal Input-Handler Init Bug'
-    shell: bash
-    working-directory: ${{ github.workspace }}/kernel/common
-    run: |
-      set -euo pipefail
-      VORPAL_C="kernel/sched/cpufreq_vorpal.c"
-
-      if ! grep -q "bool input_ok;" "$VORPAL_C"; then
-        perl -0pi -e 's{(static int __init vorpal_gov_init\(void\)\n\{\n\tint ret;\n)}{$1\tbool input_ok;\n}' "$VORPAL_C"
-      fi
-
-      if ! grep -q "input_ok = !input_register_handler" "$VORPAL_C"; then
-        perl -0pi -e 's{\tif \(input_register_handler\(&rfx_input_handler\)\)\n\t\tpr_warn\("vorpal: input handler register failed \(touch boost off\)\\n"\);}{\tinput_ok = !input_register_handler(&rfx_input_handler);\n\tif (!input_ok)\n\t\tpr_warn("vorpal: input handler register failed (touch boost off)\\n");}' "$VORPAL_C"
-      fi
-
-      if ! grep -q "if (input_ok)" "$VORPAL_C"; then
-        perl -0pi -e 's{\tret = cpufreq_register_governor\(&vorpal_gov\);\n\tif \(ret\) \{\n\t\tinput_unregister_handler\(&rfx_input_handler\);\n\t\tcancel_delayed_work_sync\(&rfx_thermal_work\);\n\t\}}{\tret = cpufreq_register_governor(&vorpal_gov);\n\tif (ret) \{\n\t\tif (input_ok)\n\t\t\tinput_unregister_handler(&rfx_input_handler);\n\t\tcancel_delayed_work_sync(&rfx_thermal_work);\n\t\}}' "$VORPAL_C"
-      fi
-
-      if ! grep -q "bool input_ok;" "$VORPAL_C"; then
-        echo "ERROR: failed to inject 'bool input_ok;' into vorpal_gov_init()" >&2
-        exit 1
-      fi
-      if ! grep -q "input_ok = !input_register_handler" "$VORPAL_C"; then
-        echo "ERROR: failed to patch input_register_handler() call in vorpal_gov_init()" >&2
-        exit 1
-      fi
-      if ! grep -q "if (input_ok)" "$VORPAL_C"; then
-        echo "ERROR: failed to guard input_unregister_handler() in vorpal_gov_init() error path" >&2
-        exit 1
-      fi
-
-  - name: 'Inject Vorpal Gaming-Mode Bias into fair.c'
-    shell: bash
-    working-directory: ${{ github.workspace }}/kernel/common
-    run: |
-      set -euo pipefail
-      FAIR_C="kernel/sched/fair.c"
-
-      if ! grep -q "extern int sched_gaming_active;" "$FAIR_C"; then
-        perl -0pi -e 's{(static unsigned int normalized_sysctl_sched_latency\s*=\s*6000000ULL;)}{$1\n\nextern int sched_gaming_active;\n\n#define GAMING_VRUNTIME_STRETCH\t\t4\n}' "$FAIR_C"
-      fi
-
-      if ! grep -q "GAMING_VRUNTIME_STRETCH - 1" "$FAIR_C"; then
-        perl -0pi -e 's{(\tcurr->vruntime \+= calc_delta_fair\(delta_exec, curr\);\n)(\tupdate_min_vruntime\(cfs_rq\);\n)}{$1\n\tif (unlikely(sched_gaming_active \&\& !entity_is_task(curr))) {\n\t\tcurr->vruntime += calc_delta_fair(delta_exec * (GAMING_VRUNTIME_STRETCH - 1), curr);\n\t} else if (unlikely(sched_gaming_active \&\& entity_is_task(curr) \&\&\n\t\t\t     curr->avg.load_avg < 100)) {\n\t\tcurr->vruntime += calc_delta_fair(delta_exec, curr);\n\t}\n$2}' "$FAIR_C"
-      fi
-
-      if ! grep -q "ideal_runtime / 2" "$FAIR_C"; then
-        perl -0pi -e 's{(\tdelta_exec = curr->sum_exec_runtime - curr->prev_sum_exec_runtime;\n)(\ttrace_android_rvh_check_preempt_tick)}{$1\n\tif (unlikely(sched_gaming_active) \&\& entity_is_task(curr)) {\n\t\tstruct task_struct *p = task_of(curr);\n\n\t\tif (p->static_prio > DEFAULT_PRIO \&\n\t\t    delta_exec > ideal_runtime / 2)\n\t\t\tresched_curr(rq_of(cfs_rq));\n\t}\n\n$2}' "$FAIR_C"
-      fi
-
-      if ! grep -q "NSEC_PER_MSEC" "$FAIR_C"; then
-        perl -0pi -e 's{(\tfor_each_sched_entity\(se\) \{\n\t\tcfs_rq = cfs_rq_of\(se\);\n\n)(\t\tupdate_load_avg\(cfs_rq, se, UPDATE_TG\);\n\t\tse_update_runnable\(se\);\n\t\tupdate_cfs_group\(se\);)}{$1\t\tif (unlikely(sched_gaming_active \&\& entity_is_task(se) \&\&\n\t\t\t     task_of(se)->static_prio <= DEFAULT_PRIO))\n\t\t\tse->vruntime -= min_t(u64, se->vruntime, NSEC_PER_MSEC);\n\n$2}' "$FAIR_C"
-      fi
-
-      if ! grep -q "Gaming task isolation" "$FAIR_C"; then
-        perl -0pi -e 's{(\tdelta = rq_clock_task\(env->src_rq\) - p->se\.exec_start;\n\n)(\treturn delta < \(s64\)sysctl_sched_migration_cost;\n\}\n)}{$1\t/* Gaming task isolation */\n\tif (sched_gaming_active) {\n\t\tif (capacity_orig_of(env->dst_cpu) < capacity_orig_of(env->src_cpu) \&\&\n\t\t    task_util(p) > (capacity_orig_of(env->src_cpu) >> 3))\n\t\t\treturn 1;\n\t\treturn delta < (s64)sysctl_sched_migration_cost * 2;\n\t}\n\n$2}' "$FAIR_C"
-      fi
-
-      for MARK in "extern int sched_gaming_active;" "GAMING_VRUNTIME_STRETCH - 1" "ideal_runtime / 2" "NSEC_PER_MSEC" "Gaming task isolation"; do
-        if ! grep -qF "$MARK" "$FAIR_C"; then
-          echo "ERROR: failed to inject fair.c gaming patch, missing marker: $MARK" >&2
-          exit 1
-        fi
-      done
-
-  - name: 'Inject Standalone Ayunda Safeprop Engine (v2 - Universal Fail-Safe)'
-    shell: bash
-    working-directory: ${{ github.workspace }}/kernel/common
-    run: |
-      set -euo pipefail
-
-      # Drop C89 strictness globally
-      sed -i 's/-Wdeclaration-after-statement//g' Makefile
-
-      # Layer 1: init/main.c
-      if [ -f "init/main.c" ]; then
-        if ! grep -q "verifiedbootstate=green" init/main.c; then
-          perl -0pi -e 's/(void\s+__init\s+setup_command_line\s*\(char\s*\*command_line\)\s*\{)/$1\n\tchar *ks;\n\twhile((ks=strstr(command_line,"verifiedbootstate=orange"))) memcpy(ks,"verifiedbootstate=green ",24);\n\twhile((ks=strstr(command_line,"verifiedbootstate=red"))) memcpy(ks,"verifiedbootstate=green",23);\n\twhile((ks=strstr(command_line,"flash.locked=0"))) memcpy(ks,"flash.locked=1",14);\n\twhile((ks=strstr(command_line,"veritymode=logging"))) memcpy(ks,"veritymode=enforcing",20);/' init/main.c
-          echo "--> Layer 1 (init/main.c) patched successfully!"
-        else
-          echo "--> Layer 1 already patched, skipping."
-        fi
-      fi
-
-      # Layer 2: fs/proc/cmdline.c
-      if [ -f "fs/proc/cmdline.c" ]; then
-        if ! grep -q "verifiedbootstate=green" fs/proc/cmdline.c; then
-          sed -i '1 i\#include <linux/slab.h>' fs/proc/cmdline.c
-          perl -0pi -e 's/(static int\s+cmdline_proc_show\s*\(struct seq_file\s*\*m,\s*void\s*\*v\)\s*\{)/$1\n\tchar *c = kstrdup(saved_command_line, GFP_KERNEL);\n\tif(c){\n\t\tchar *s;\n\t\twhile((s=strstr(c,"verifiedbootstate=orange"))) memcpy(s,"verifiedbootstate=green ",24);\n\t\twhile((s=strstr(c,"verifiedbootstate=red"))) memcpy(s,"verifiedbootstate=green",23);\n\t\twhile((s=strstr(c,"flash.locked=0"))) memcpy(s,"flash.locked=1",14);\n\t\twhile((s=strstr(c,"veritymode=logging"))) memcpy(s,"veritymode=enforcing",20);\n\t\tseq_printf(m, "%s\\n", c);\n\t\tkfree(c);\n\t\treturn 0;\n\t}/' fs/proc/cmdline.c
-          echo "--> Layer 2 (fs/proc/cmdline.c) patched successfully!"
-        else
-          echo "--> Layer 2 already patched, skipping."
-        fi
-      fi
-
-      # Layer 3: fs/proc/bootconfig.c
-      if [ -f "fs/proc/bootconfig.c" ]; then
-        if ! grep -q "verifiedbootstate.*green" fs/proc/bootconfig.c; then
-          sed -i '1 i\#include <linux/slab.h>' fs/proc/bootconfig.c
-          perl -0pi -e 's/(static int\s+bootconfig_proc_show\s*\(struct seq_file\s*\*m,\s*void\s*\*v\)\s*\{)/$1\n\tchar *b = kmalloc(bootconfig_data_size + 1, GFP_KERNEL);\n\tif(b){\n\t\tchar *s;\n\t\tmemcpy(b, bootconfig_data, bootconfig_data_size);\n\t\tb[bootconfig_data_size] = 0;\n\t\twhile((s=strstr(b,"verifiedbootstate = \"orange\""))) memcpy(s, "verifiedbootstate  = \"green\"", 27);\n\t\twhile((s=strstr(b,"device_state = \"unlocked\""))) memcpy(s, "device_state   = \"locked\"", 25);\n\t\twhile((s=strstr(b,"flash.locked = \"0\""))) memcpy(s, "flash.locked = \"1\"", 18);\n\t\twhile((s=strstr(b,"veritymode = \"logging\""))) memcpy(s, "veritymode = \"enforcing\"", 24);\n\t\tseq_write(m, b, bootconfig_data_size);\n\t\tkfree(b);\n\t\treturn 0;\n\t}/' fs/proc/bootconfig.c
-          echo "--> Layer 3 (fs/proc/bootconfig.c) patched successfully!"
-        else
-          echo "--> Layer 3 already patched, skipping."
-        fi
-      fi
-
-  - name: 'Build Kernel'
-    shell: bash
-    working-directory: ${{ github.workspace }}/kernel
-    run: |
-      sed -i 's/check_defconfig//' ./common/build.config.gki
-      if [ -f "build/build.sh" ]; then
-        BUILD_GKI_ARTIFACTS= \
-        BUILD_GKI_CERTIFICATION_TOOLS=0 \
-        BUILD_SYSTEM_DLKM=0 \
-        SKIP_VENDOR_BOOT=1 \
-        SKIP_EXT_MODULES=1 \
-        SKIP_CP_KERNEL_HDR=1 \
-        OUT_DIR="/home/runner/out" \
-        LTO=thin \
-        BUILD_CONFIG=common/build.config.gki.aarch64 \
-        build/build.sh -j"$(nproc)" \
-        CC="/usr/bin/ccache clang" \
-        CXX="/usr/bin/ccache clang+" \
-        HOSTCC="/usr/bin/ccache clang" \
-        HOSTCXX="/usr/bin/ccache clang+" \
-        LD="${{ github.workspace }}/kernel/common/ld-wrapper" \
-        HOSTLD="${{ github.workspace }}/kernel/common/ld-wrapper"
-      else
-        if [[ ${{ inputs.version }} == "android16-6.12" ]]; then
-          if [ "${{ inputs.bypass }}" = "false" ]; then
-            sed -i '/name = "kernel_aarch64",/a\    check_defconfig = "disabled",' common/BUILD.bazel
+runs:
+  using: "composite"
+  steps:
+    - name: 'Activate Bypass'
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel
+      run: |
+        set -euo pipefail
+        if [ "${{ inputs.bypass }}" = "true" ]; then
+          if [[ ${{ inputs.version }} == "android14-6.1" || ${{ inputs.version }} == "android15-6.6" || ${{ inputs.version }} == "android16-6.12" ]]; then
+            TARGET_FILE="${{ github.workspace }}/kernel/common/kernel/module/version.c"
+          else
+            TARGET_FILE="${{ github.workspace }}/kernel/common/kernel/module.c"
           fi
-          tools/bazel run \
-            --config=fast \
-            --config=stamp \
-            --disk_cache=/home/runner/.cache/bazel \
-            //common:kernel_aarch64_dist \
-            -- --destdir=/home/runner/out
-        else
-          tools/bazel run \
-            --config=fast \
-            --config=stamp \
-            --disk_cache=/home/runner/.cache/bazel \
-            //common:kernel_aarch64_dist \
-            -- --dist_dir=/home/runner/out
-        fi
-      fi
 
-  - name: 'Gather Build Artifacts'
-    shell: bash
-    working-directory: ${{ github.workspace }}
-    run: |
-      set -euo pipefail
-      if [ -f "/home/runner/out/dist/Image" ]; then
-        if [[ ${{ inputs.bypass }} == "true" ]]; then
-          cp "/home/runner/out/dist/Image" "${{ github.workspace }}/AnyKernel3/Bypass-Image"
-        else
-          cp "/home/runner/out/dist/Image" "${{ github.workspace }}/AnyKernel3/Image"
-        fi
-        exit 0
-      fi
-      if [ -f "/home/runner/out/Image" ]; then
-        if [[ ${{ inputs.bypass }} == "true" ]]; then
-          cp "/home/runner/out/Image" "${{ github.workspace }}/AnyKernel3/Bypass-Image"
-        else
-          cp "/home/runner/out/Image" "${{ github.workspace }}/AnyKernel3/Image"
-        fi
-        exit 0
-      fi
-      exit 1
+          sed -i '/bad_version:/{:a;n;/return 0;/{s/return 0;/return 1;/;b};ba}' "$TARGET_FILE"
 
-  - name: 'Patch AnyKernel3 for Bypass Hack'
-    shell: bash
-    if: ${{ inputs.bypass == 'true' }}
-    working-directory: ${{ github.workspace }}/AnyKernel3
-    run: |
-      set -euo pipefail
-      cp ${{ github.action_path }}/patches/bypass.patch "${{ github.workspace }}/AnyKernel3/bypass.patch"
+          if ! grep -A 5 "bad_version:" "$TARGET_FILE" | grep -q "return 1;"; then
+            echo "Patch failed! 'return 1;' not found at bad_version:"
+            grep -A 10 "bad_version:" "$TARGET_FILE" || true
+            exit 1
+          fi
+        else
+          echo "Bypass hack not applied as per input parameter."
+        fi
+
+    - name: 'Force Inject Performance & Battery Configs'
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        set -euo pipefail
+        DEFCONFIG="arch/arm64/configs/gki_defconfig"
+
+        echo "Injecting custom configs into $DEFCONFIG..."
+
+        cat << 'EOF' >> "$DEFCONFIG"
+        CONFIG_ZRAM=m
+        CONFIG_ZRAM_DEF_COMP_ZSTD=y
+        CONFIG_ZSMALLOC=m
+        CONFIG_ZSMALLOC_STAT=y
+        CONFIG_LRU_GEN=y
+        CONFIG_LRU_GEN_ENABLED=y
+        CONFIG_LRU_GEN_STATS=n
+        CONFIG_COMPACTION=y
+        CONFIG_MIGRATION=y
+        CONFIG_KSM=y
+        CONFIG_TRANSPARENT_HUGEPAGE=y
+        CONFIG_IOSCHED_BFQ=y
+        CONFIG_BFQ_GROUP_IOSCHED=y
+        CONFIG_MQ_IOSCHED_DEADLINE=y
+        CONFIG_PREEMPT=y
+        CONFIG_PREEMPT_NONE=n
+        CONFIG_PREEMPT_VOLUNTARY=n
+        CONFIG_HIGH_RES_TIMERS=y
+        CONFIG_TCP_FASTOPEN=y
+        CONFIG_CPU_IDLE=y
+        CONFIG_CPU_IDLE_GOV_MENU=y
+        CONFIG_CPU_IDLE_GOV_TEO=y
+        CONFIG_WQ_POWER_EFFICIENT_DEFAULT=y
+        CONFIG_PM_WAKELOCKS=y
+        CONFIG_PM_WAKELOCKS_LIMIT=100
+        CONFIG_PM_WAKELOCKS_GC=y
+        CONFIG_SUSPEND=y
+        CONFIG_SUSPEND_FREEZER=y
+        CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y
+        CONFIG_ENERGY_MODEL=y
+        CONFIG_SCHED_MC=y
+        CONFIG_NO_HZ_IDLE=y
+        CONFIG_NO_HZ_FULL=n
+        EOF
+
+    - name: 'Inject MomenToMoiX Driver'
+      shell: bash
+      run: |
+        set -euo pipefail
+        TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
+        mkdir -p "$TARGET_DIR/drivers/momx"
+        cd "${{ github.action_path }}/patches/tenebrion"
+        cp MomenToMoiX.c "$TARGET_DIR/drivers/momx/MomenToMoiX.c"
+        cp Makefile "$TARGET_DIR/drivers/momx/Makefile"
+        cp selinux.sh "$TARGET_DIR/drivers/momx/Sekinux.sh"
+        if ! grep -q "momx/" "$TARGET_DIR/drivers/Makefile"; then
+          echo "obj-y += momx/" >> "$TARGET_DIR/drivers/Makefile"
+        fi
+
+    - name: 'Inject MomenToMoiX SELinux Rules'
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        set -euo pipefail
+        SELINUX_PATCH_PATH="${{ github.action_path }}/patches/tenebrion/selinux.sh"
+        cp "$SELINUX_PATCH_PATH" ./selinux.sh
+        chmod +x ./selinux.sh
+        RULES_FILE=$(find -L drivers/kernelsu -type f -name "rules.c" 2>/dev/null | head -1)
+        if [[ -z "$RULES_FILE" ]]; then
+          RULES_FILE=$(grep -rl "ksu_allow" . --include="rules.c" 2>/dev/null | head -1)
+        fi
+        if [[ -z "$RULES_FILE" ]]; then
+          exit 1
+        fi
+        export SELINUX_RULES_C="$RULES_FILE"
+        ./selinux.sh
+
+    - name: 'Inject Reflex Governor'
+      shell: bash
+      run: |
+        set -euo pipefail
+        TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
+
+        mkdir -p "$TARGET_DIR/kernel/sched"
+        cp "${{ github.action_path }}/patches/reflex/cpufreq_reflex.c" "$TARGET_DIR/kernel/sched/cpufreq_reflex.c"
+
+        if ! grep -q "cpufreq_reflex.o" "$TARGET_DIR/kernel/sched/Makefile"; then
+          echo 'obj-$(CONFIG_CPU_FREQ_GOV_REFLEX) += cpufreq_reflex.o' >> "$TARGET_DIR/kernel/sched/Makefile"
+        fi
+
+        if ! grep -q "config CPU_FREQ_GOV_REFLEX" "$TARGET_DIR/drivers/cpufreq/Kconfig"; then
+          printf "\nconfig CPU_FREQ_GOV_REFLEX\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+          printf "\ttristate \"'reflex' cpufreq governor\"\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+          printf "\tdepends on CPU_FREQ && SMP\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+          printf "\tselect CPU_FREQ_GOV_ATTR_SET\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+          printf "\thelp\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+          printf "\t  'reflex' is an advanced CPU frequency governor based on schedutil,\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+          printf "\t  featuring idle-time accounting and PELT-complementary exponential decay.\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+        fi
+
+        DEFCONFIG_GKI="$TARGET_DIR/arch/arm64/configs/gki_defconfig"
+        if [ -f "$DEFCONFIG_GKI" ]; then
+          if ! grep -q "CONFIG_CPU_FREQ_GOV_REFLEX" "$DEFCONFIG_GKI"; then
+            echo "CONFIG_CPU_FREQ_GOV_REFLEX=y" >> "$DEFCONFIG_GKI"
+          fi
+        fi
+
+    - name: 'Inject Vorpal Governor + GKI510 Compat'
+      shell: bash
+      run: |
+        set -euo pipefail
+        TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
+
+        mkdir -p "$TARGET_DIR/kernel/sched"
+        cp "${{ github.action_path }}/patches/vorpal/cpufreq_vorpal.c" "$TARGET_DIR/kernel/sched/cpufreq_vorpal.c"
+        cp "${{ github.action_path }}/patches/vorpal/rfx_gki510_compat.c" "$TARGET_DIR/kernel/sched/rfx_gki510_compat.c"
+
+        if ! grep -q "cpufreq_vorpal.o" "$TARGET_DIR/kernel/sched/Makefile"; then
+          echo 'obj-$(CONFIG_CPU_FREQ_GOV_VORPAL) += cpufreq_vorpal.o' >> "$TARGET_DIR/kernel/sched/Makefile"
+        fi
+
+        if ! grep -q "rfx_gki510_compat.o" "$TARGET_DIR/kernel/sched/Makefile"; then
+          echo 'obj-y += rfx_gki510_compat.o' >> "$TARGET_DIR/kernel/sched/Makefile"
+        fi
+
+        if ! grep -q "config CPU_FREQ_GOV_VORPAL" "$TARGET_DIR/drivers/cpufreq/Kconfig"; then
+          printf "\nconfig CPU_FREQ_GOV_VORPAL\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+          printf "\ttristate \"'vorpal' cpufreq governor\"\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+          printf "\tdepends on CPU_FREQ && SMP\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+          printf "\tselect CPU_FREQ_GOV_ATTR_SET\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+          printf "\thelp\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+          printf "\t  'vorpal' is a schedutil-based governor tuned for\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+          printf "\t  gaming/thermal-aware dual-profile operation.\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+        fi
+
+        DEFCONFIG_GKI="$TARGET_DIR/arch/arm64/configs/gki_defconfig"
+        if [ -f "$DEFCONFIG_GKI" ] && ! grep -q "CONFIG_CPU_FREQ_GOV_VORPAL" "$DEFCONFIG_GKI"; then
+          echo "CONFIG_CPU_FREQ_GOV_VORPAL=y" >> "$DEFCONFIG_GKI"
+        fi
+
+    - name: 'Fix Vorpal Input-Handler Init Bug'
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        set -euo pipefail
+        VORPAL_C="kernel/sched/cpufreq_vorpal.c"
+
+        if ! grep -q "bool input_ok;" "$VORPAL_C"; then
+          perl -0pi -e 's{(static int __init vorpal_gov_init\(void\)\n\{\n\tint ret;\n)}{$1\tbool input_ok;\n}' "$VORPAL_C"
+        fi
+
+        if ! grep -q "input_ok = !input_register_handler" "$VORPAL_C"; then
+          perl -0pi -e 's{\tif \(input_register_handler\(&rfx_input_handler\)\)\n\t\tpr_warn\("vorpal: input handler register failed \(touch boost off\)\\n"\);}{\tinput_ok = !input_register_handler(&rfx_input_handler);\n\tif (!input_ok)\n\t\tpr_warn("vorpal: input handler register failed (touch boost off)\\n");}' "$VORPAL_C"
+        fi
+
+        if ! grep -q "if (input_ok)" "$VORPAL_C"; then
+          perl -0pi -e 's{\tret = cpufreq_register_governor\(&vorpal_gov\);\n\tif \(ret\) \{\n\t\tinput_unregister_handler\(&rfx_input_handler\);\n\t\tcancel_delayed_work_sync\(&rfx_thermal_work\);\n\t\}}{\tret = cpufreq_register_governor(&vorpal_gov);\n\tif (ret) \{\n\t\tif (input_ok)\n\t\t\tinput_unregister_handler(&rfx_input_handler);\n\t\tcancel_delayed_work_sync(&rfx_thermal_work);\n\t\}}' "$VORPAL_C"
+        fi
+
+        if ! grep -q "bool input_ok;" "$VORPAL_C"; then
+          echo "ERROR: failed to inject 'bool input_ok;' into vorpal_gov_init()" >&2
+          exit 1
+        fi
+        if ! grep -q "input_ok = !input_register_handler" "$VORPAL_C"; then
+          echo "ERROR: failed to patch input_register_handler() call in vorpal_gov_init()" >&2
+          exit 1
+        fi
+        if ! grep -q "if (input_ok)" "$VORPAL_C"; then
+          echo "ERROR: failed to guard input_unregister_handler() in vorpal_gov_init() error path" >&2
+          exit 1
+        fi
+
+    - name: 'Inject Vorpal Gaming-Mode Bias into fair.c'
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        set -euo pipefail
+        FAIR_C="kernel/sched/fair.c"
+
+        if ! grep -q "extern int sched_gaming_active;" "$FAIR_C"; then
+          perl -0pi -e 's{(static unsigned int normalized_sysctl_sched_latency\s*=\s*6000000ULL;)}{$1\n\nextern int sched_gaming_active;\n\n#define GAMING_VRUNTIME_STRETCH\t\t4\n}' "$FAIR_C"
+        fi
+
+        if ! grep -q "GAMING_VRUNTIME_STRETCH - 1" "$FAIR_C"; then
+          perl -0pi -e 's{(\tcurr->vruntime \+= calc_delta_fair\(delta_exec, curr\);\n)(\tupdate_min_vruntime\(cfs_rq\);\n)}{$1\n\tif (unlikely(sched_gaming_active \&\& !entity_is_task(curr))) {\n\t\tcurr->vruntime += calc_delta_fair(delta_exec * (GAMING_VRUNTIME_STRETCH - 1), curr);\n\t} else if (unlikely(sched_gaming_active \&\& entity_is_task(curr) \&\&\n\t\t\t     curr->avg.load_avg < 100)) {\n\t\tcurr->vruntime += calc_delta_fair(delta_exec, curr);\n\t}\n$2}' "$FAIR_C"
+        fi
+
+        if ! grep -q "ideal_runtime / 2" "$FAIR_C"; then
+          perl -0pi -e 's{(\tdelta_exec = curr->sum_exec_runtime - curr->prev_sum_exec_runtime;\n)(\ttrace_android_rvh_check_preempt_tick)}{$1\n\tif (unlikely(sched_gaming_active) \&\& entity_is_task(curr)) {\n\t\tstruct task_struct *p = task_of(curr);\n\n\t\tif (p->static_prio > DEFAULT_PRIO \&\n\t\t    delta_exec > ideal_runtime / 2)\n\t\t\tresched_curr(rq_of(cfs_rq));\n\t}\n\n$2}' "$FAIR_C"
+        fi
+
+        if ! grep -q "NSEC_PER_MSEC" "$FAIR_C"; then
+          perl -0pi -e 's{(\tfor_each_sched_entity\(se\) \{\n\t\tcfs_rq = cfs_rq_of\(se\);\n\n)(\t\tupdate_load_avg\(cfs_rq, se, UPDATE_TG\);\n\t\tse_update_runnable\(se\);\n\t\tupdate_cfs_group\(se\);)}{$1\t\tif (unlikely(sched_gaming_active \&\& entity_is_task(se) \&\&\n\t\t\t     task_of(se)->static_prio <= DEFAULT_PRIO))\n\t\t\tse->vruntime -= min_t(u64, se->vruntime, NSEC_PER_MSEC);\n\n$2}' "$FAIR_C"
+        fi
+
+        if ! grep -q "Gaming task isolation" "$FAIR_C"; then
+          perl -0pi -e 's{(\tdelta = rq_clock_task\(env->src_rq\) - p->se\.exec_start;\n\n)(\treturn delta < \(s64\)sysctl_sched_migration_cost;\n\}\n)}{$1\t/* Gaming task isolation */\n\tif (sched_gaming_active) {\n\t\tif (capacity_orig_of(env->dst_cpu) < capacity_orig_of(env->src_cpu) \&\&\n\t\t    task_util(p) > (capacity_orig_of(env->src_cpu) >> 3))\n\t\t\treturn 1;\n\t\treturn delta < (s64)sysctl_sched_migration_cost * 2;\n\t}\n\n$2}' "$FAIR_C"
+        fi
+
+        for MARK in "extern int sched_gaming_active;" "GAMING_VRUNTIME_STRETCH - 1" "ideal_runtime / 2" "NSEC_PER_MSEC" "Gaming task isolation"; do
+          if ! grep -qF "$MARK" "$FAIR_C"; then
+            echo "ERROR: failed to inject fair.c gaming patch, missing marker: $MARK" >&2
+            exit 1
+          fi
+        done
+
+    - name: 'Inject Standalone Ayunda Safeprop Engine (v2 - Universal Fail-Safe)'
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        set -euo pipefail
+
+        # Drop C89 strictness globally
+        sed -i 's/-Wdeclaration-after-statement//g' Makefile
+
+        # Layer 1: init/main.c
+        if [ -f "init/main.c" ]; then
+          if ! grep -q "verifiedbootstate=green" init/main.c; then
+            perl -0pi -e 's/(void\s+__init\s+setup_command_line\s*\(char\s*\*command_line\)\s*\{)/$1\n\tchar *ks;\n\twhile((ks=strstr(command_line,"verifiedbootstate=orange"))) memcpy(ks,"verifiedbootstate=green ",24);\n\twhile((ks=strstr(command_line,"verifiedbootstate=red"))) memcpy(ks,"verifiedbootstate=green",23);\n\twhile((ks=strstr(command_line,"flash.locked=0"))) memcpy(ks,"flash.locked=1",14);\n\twhile((ks=strstr(command_line,"veritymode=logging"))) memcpy(ks,"veritymode=enforcing",20);/' init/main.c
+            echo "--> Layer 1 (init/main.c) patched successfully!"
+          else
+            echo "--> Layer 1 already patched, skipping."
+          fi
+        fi
+
+        # Layer 2: fs/proc/cmdline.c
+        if [ -f "fs/proc/cmdline.c" ]; then
+          if ! grep -q "verifiedbootstate=green" fs/proc/cmdline.c; then
+            sed -i '1 i\#include <linux/slab.h>' fs/proc/cmdline.c
+            perl -0pi -e 's/(static int\s+cmdline_proc_show\s*\(struct seq_file\s*\*m,\s*void\s*\*v\)\s*\{)/$1\n\tchar *c = kstrdup(saved_command_line, GFP_KERNEL);\n\tif(c){\n\t\tchar *s;\n\t\twhile((s=strstr(c,"verifiedbootstate=orange"))) memcpy(s,"verifiedbootstate=green ",24);\n\t\twhile((s=strstr(c,"verifiedbootstate=red"))) memcpy(s,"verifiedbootstate=green",23);\n\t\twhile((s=strstr(c,"flash.locked=0"))) memcpy(s,"flash.locked=1",14);\n\t\twhile((s=strstr(c,"veritymode=logging"))) memcpy(s,"veritymode=enforcing",20);\n\t\tseq_printf(m, "%s\\n", c);\n\t\tkfree(c);\n\t\treturn 0;\n\t}/' fs/proc/cmdline.c
+            echo "--> Layer 2 (fs/proc/cmdline.c) patched successfully!"
+          else
+            echo "--> Layer 2 already patched, skipping."
+          fi
+        fi
+
+        # Layer 3: fs/proc/bootconfig.c
+        if [ -f "fs/proc/bootconfig.c" ]; then
+          if ! grep -q "verifiedbootstate.*green" fs/proc/bootconfig.c; then
+            sed -i '1 i\#include <linux/slab.h>' fs/proc/bootconfig.c
+            perl -0pi -e 's/(static int\s+bootconfig_proc_show\s*\(struct seq_file\s*\*m,\s*void\s*\*v\)\s*\{)/$1\n\tchar *b = kmalloc(bootconfig_data_size + 1, GFP_KERNEL);\n\tif(b){\n\t\tchar *s;\n\t\tmemcpy(b, bootconfig_data, bootconfig_data_size);\n\t\tb[bootconfig_data_size] = 0;\n\t\twhile((s=strstr(b,"verifiedbootstate = \"orange\""))) memcpy(s, "verifiedbootstate  = \"green\"", 27);\n\t\twhile((s=strstr(b,"device_state = \"unlocked\""))) memcpy(s, "device_state   = \"locked\"", 25);\n\t\twhile((s=strstr(b,"flash.locked = \"0\""))) memcpy(s, "flash.locked = \"1\"", 18);\n\t\twhile((s=strstr(b,"veritymode = \"logging\""))) memcpy(s, "veritymode = \"enforcing\"", 24);\n\t\tseq_write(m, b, bootconfig_data_size);\n\t\tkfree(b);\n\t\treturn 0;\n\t}/' fs/proc/bootconfig.c
+            echo "--> Layer 3 (fs/proc/bootconfig.c) patched successfully!"
+          else
+            echo "--> Layer 3 already patched, skipping."
+          fi
+        fi
+
+    - name: 'Build Kernel'
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel
+      run: |
+        sed -i 's/check_defconfig//' ./common/build.config.gki
+        if [ -f "build/build.sh" ]; then
+          BUILD_GKI_ARTIFACTS= \
+          BUILD_GKI_CERTIFICATION_TOOLS=0 \
+          BUILD_SYSTEM_DLKM=0 \
+          SKIP_VENDOR_BOOT=1 \
+          SKIP_EXT_MODULES=1 \
+          SKIP_CP_KERNEL_HDR=1 \
+          OUT_DIR="/home/runner/out" \
+          LTO=thin \
+          BUILD_CONFIG=common/build.config.gki.aarch64 \
+          build/build.sh -j"$(nproc)" \
+          CC="/usr/bin/ccache clang" \
+          CXX="/usr/bin/ccache clang+" \
+          HOSTCC="/usr/bin/ccache clang" \
+          HOSTCXX="/usr/bin/ccache clang+" \
+          LD="${{ github.workspace }}/kernel/common/ld-wrapper" \
+          HOSTLD="${{ github.workspace }}/kernel/common/ld-wrapper"
+        else
+          if [[ ${{ inputs.version }} == "android16-6.12" ]]; then
+            if [ "${{ inputs.bypass }}" = "false" ]; then
+              sed -i '/name = "kernel_aarch64",/a\    check_defconfig = "disabled",' common/BUILD.bazel
+            fi
+            tools/bazel run \
+              --config=fast \
+              --config=stamp \
+              --disk_cache=/home/runner/.cache/bazel \
+              //common:kernel_aarch64_dist \
+              -- --destdir=/home/runner/out
+          else
+            tools/bazel run \
+              --config=fast \
+              --config=stamp \
+              --disk_cache=/home/runner/.cache/bazel \
+              //common:kernel_aarch64_dist \
+              -- --dist_dir=/home/runner/out
+          fi
+        fi
+
+    - name: 'Gather Build Artifacts'
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      run: |
+        set -euo pipefail
+        if [ -f "/home/runner/out/dist/Image" ]; then
+          if [[ ${{ inputs.bypass }} == "true" ]]; then
+            cp "/home/runner/out/dist/Image" "${{ github.workspace }}/AnyKernel3/Bypass-Image"
+          else
+            cp "/home/runner/out/dist/Image" "${{ github.workspace }}/AnyKernel3/Image"
+          fi
+          exit 0
+        fi
+        if [ -f "/home/runner/out/Image" ]; then
+          if [[ ${{ inputs.bypass }} == "true" ]]; then
+            cp "/home/runner/out/Image" "${{ github.workspace }}/AnyKernel3/Bypass-Image"
+          else
+            cp "/home/runner/out/Image" "${{ github.workspace }}/AnyKernel3/Image"
+          fi
+          exit 0
+        fi
+        exit 1
+
+    - name: 'Patch AnyKernel3 for Bypass Hack'
+      shell: bash
+      if: ${{ inputs.bypass == 'true' }}
+      working-directory: ${{ github.workspace }}/AnyKernel3
+      run: |
+        set -euo pipefail
+        cp ${{ github.action_path }}/patches/bypass.patch "${{ github.workspace }}/AnyKernel3/bypass.patch"
