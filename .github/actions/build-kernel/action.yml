@@ -246,9 +246,6 @@ runs:
       run: |
         set -euo pipefail
 
-        # Drop C89 strictness globally
-        sed -i 's/-Wdeclaration-after-statement//g' Makefile
-
         # Layer 1: init/main.c
         if [ -f "init/main.c" ]; then
           if ! grep -q "verifiedbootstate=green" init/main.c; then
