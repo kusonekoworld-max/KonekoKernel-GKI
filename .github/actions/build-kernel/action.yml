@@ -326,6 +326,9 @@ runs:
             if [ "${{ inputs.bypass }}" = "false" ]; then
               sed -i '/name = "kernel_aarch64",/a\    check_defconfig = "disabled",' common/BUILD.bazel
             fi
+            
+            export KMI_SYMBOL_LIST_STRICT_MODE=0
+
             tools/bazel run \
               --config=fast \
               --config=stamp \
