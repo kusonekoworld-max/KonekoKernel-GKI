@@ -44,9 +44,9 @@ runs:
         echo "Injecting custom configs into $DEFCONFIG..."
 
         cat << 'EOF' >> "$DEFCONFIG"
-        CONFIG_ZRAM=y
+        CONFIG_ZRAM=m
         CONFIG_ZRAM_DEF_COMP_ZSTD=y
-        CONFIG_ZSMALLOC=y
+        CONFIG_ZSMALLOC=m
         CONFIG_ZSMALLOC_STAT=y
         CONFIG_LRU_GEN=y
         CONFIG_LRU_GEN_ENABLED=y
