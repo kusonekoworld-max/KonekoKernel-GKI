@@ -77,34 +77,6 @@ runs:
         CONFIG_SCHED_MC=y
         CONFIG_NO_HZ_IDLE=y
         CONFIG_NO_HZ_FULL=n
-
-        # CONFIG_STACK_TRACER is not set
-        # CONFIG_SCHED_TRACER is not set
-        # CONFIG_IRQSOFF_TRACER is not set
-        # CONFIG_PREEMPT_TRACER is not set
-        # CONFIG_PREEMPTIRQ_EVENTS is not set
-        # CONFIG_FTRACE_SYSCALLS is not set
-        # CONFIG_BLK_DEV_IO_TRACE is not set
-        # CONFIG_KPROBE_EVENTS is not set
-        # CONFIG_UPROBE_EVENTS is not set
-        # CONFIG_SYNTH_EVENTS is not set
-        # CONFIG_HIST_TRIGGERS is not set
-        # CONFIG_DYNAMIC_EVENTS is not set
-        # CONFIG_TRACER_SNAPSHOT is not set
-        # CONFIG_BOOTTIME_TRACING is not set
-
-        # RCU debug instrumentation
-        # CONFIG_RCU_TRACE is not set
-
-        # Misc dev-only debug features
-        # CONFIG_DEBUG_KOBJECT is not set
-        # CONFIG_FAULT_INJECTION is not set
-        # CONFIG_KGDB is not set
-        # CONFIG_DEBUG_STACK_USAGE is not set
-        # CONFIG_DEBUG_PREEMPT is not set
-        # CONFIG_DEBUG_LIST is not set
-        # CONFIG_DEBUG_PLIST is not set
-        # CONFIG_DYNAMIC_DEBUG is not set
         EOF
 
         echo "Configs injected successfully."
