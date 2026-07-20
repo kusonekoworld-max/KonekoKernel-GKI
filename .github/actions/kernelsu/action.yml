@@ -1,50 +1,41 @@
-name: Setup KOWSU
-description: Download and configure KOWSU (KOWX712/KernelSU) directly into GKI tree
+name: Setup Wild KSU
+description: Download and configure Wild KSU with version tracking
 inputs:
   ksu_branch:
-    description: 'KOWSU branch, tag, or commit (empty = master)'
+    description: 'KernelSU branch or commit (empty = latest dev-susfs branch tip)'
     required: false
-    default: "master"
+    default: ""
 
 runs:
   using: composite
   steps:
-    - name: Download and Configure KOWSU
+    - name: Download Wild KSU
       shell: bash
       working-directory: ${{ github.workspace }}/kernel
       run: |
         set -euo pipefail
 
+        KSU_REPO="https://github.com/pershoot/KernelSU-Next.git"
         KSU_INPUT="${{ inputs.ksu_branch }}"
         if [ -z "$KSU_INPUT" ]; then
-          KSU_INPUT="master"
+          KSU_INPUT="dev-susfs"
         fi
 
-        echo "Using KOWSU ref: $KSU_INPUT"
+        # Try as branch first, fall back to commit
+        if git ls-remote --heads "$KSU_REPO" "$KSU_INPUT" | grep -q .; then
+          echo "Using KernelSU-Next branch: $KSU_INPUT"
+          curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/dev-susfs/kernel/setup.sh" | bash -s dev-susfs
+          git -C KernelSU-Next/kernel fetch --depth=50 origin "$KSU_INPUT"
+          git -C KernelSU-Next/kernel checkout "origin/$KSU_INPUT"
+        else
+          echo "Using KernelSU-Next commit: $KSU_INPUT"
+          curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/dev-susfs/kernel/setup.sh" | bash -s dev-susfs
+          git -C KernelSU-Next/kernel fetch --depth=50 origin "$KSU_INPUT"
+          git -C KernelSU-Next/kernel checkout "$KSU_INPUT"
+        fi
+
+        cd KernelSU-Next/kernel
         
-        rm -rf KernelSU
-        git clone https://github.com/KOWX712/KernelSU.git KernelSU
-        cd KernelSU
-        git checkout "$KSU_INPUT"
-        cd ..
-
-        TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
-
-        echo "[+] Linking KOWSU to GKI Tree at $TARGET_DIR..."
-        
-        ln -sf "$GITHUB_WORKSPACE/kernel/KernelSU/kernel" "$TARGET_DIR/drivers/kernelsu"
-
-        if ! grep -q "obj-y += kernelsu/" "$TARGET_DIR/drivers/Makefile"; then
-          echo "obj-y += kernelsu/" >> "$TARGET_DIR/drivers/Makefile"
-          echo "[+] Successfully registered KOWSU to drivers/Makefile"
-        fi
-
-        if ! grep -q "source \"drivers/kernelsu/Kconfig\"" "$TARGET_DIR/drivers/Kconfig"; then
-          echo 'source "drivers/kernelsu/Kconfig"' >> "$TARGET_DIR/drivers/Kconfig"
-          echo "[+] Successfully registered KOWSU to drivers/Kconfig"
-        fi
-
-        cd KernelSU/kernel
         COMMITS_COUNT=$(/usr/bin/git rev-list --count HEAD)
         BASE_VERSION=30000
         KSU_VERSION=$(expr $COMMITS_COUNT "+" $BASE_VERSION)
@@ -52,39 +43,32 @@ runs:
 
         KSU_GIT_TAG="$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.1")"
         sed -i "s/^KSU_VERSION_TAG_FALLBACK := v0.0.1$/KSU_VERSION_TAG_FALLBACK := ${KSU_GIT_TAG}/" Kbuild
-
-        DEFCONFIG_GKI="$TARGET_DIR/arch/arm64/configs/gki_defconfig"
-        if [ -f "$DEFCONFIG_GKI" ]; then
-          if ! grep -q "CONFIG_KSU" "$DEFCONFIG_GKI"; then
-            echo "" >> "$DEFCONFIG_GKI"
-            echo "CONFIG_KSU=y" >> "$DEFCONFIG_GKI"
-            echo "[+] Successfully injected CONFIG_KSU=y to gki_defconfig"
-          fi
-        fi
-
+    
     - name: Extract KSU Version Info
       id: ksu-version
       shell: bash
-      working-directory: ${{ github.workspace }}/kernel/KernelSU
+      working-directory: ${{ github.workspace }}/kernel/KernelSU-Next
       run: |
-        KSU_GIT_VERSION=$(git rev-list --count HEAD 2>/dev/null)
-        KSU_GIT_TAG=$(git describe --tags --abbrev=0 HEAD 2>/dev/null || echo "")
-        KSU_COMMIT=$(git rev-parse --short HEAD 2>/dev/null)
+        # Fetch dev branch for version info (tags, commits, etc.)
+        git fetch --depth=50 origin dev 2>/dev/null || true
+        
+        # Extract and export KSU version info from dev branch
+        KSU_GIT_VERSION=$(git rev-list --count origin/dev 2>/dev/null)
+        KSU_GIT_TAG=$(git describe --tags --abbrev=0 origin/dev 2>/dev/null || echo "")
+        KSU_COMMIT=$(git rev-parse --short origin/dev 2>/dev/null)
         KSU_VERSION=$((30000 + KSU_GIT_VERSION))
-
+        
         echo "KSU_GIT_TAG=$KSU_GIT_TAG" >> $GITHUB_ENV
         echo "KSU_VERSION=$KSU_VERSION" >> $GITHUB_ENV
         echo "KSU_COMMIT=$KSU_COMMIT" >> $GITHUB_ENV
 
-    - name: 'Fix KOWSU'
+    - name: 'Fix KernelSU-Next'
       shell: bash
-      working-directory: ${{ github.workspace }}/kernel/KernelSU
+      working-directory: ${{ github.workspace }}/kernel/KernelSU-Next
       run: |
         set -euo pipefail
-        if [ -f "${{ github.action_path }}/patches/static.patch" ]; then
-          cp ${{ github.action_path }}/patches/static.patch "${{ github.workspace }}/kernel/KernelSU/static.patch"
-          patch -p1 < static.patch || echo "[!] Patch skipped or already applied"
-        fi
+        cp ${{ github.action_path }}/patches/static.patch "${{ github.workspace }}/kernel/KernelSU-Next/static.patch"
+        patch -p1 < static.patch
 
     - name: Enable Kernel Configs
       uses: ./.github/actions/set-kernel-config
