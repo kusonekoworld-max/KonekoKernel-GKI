@@ -1,3 +1,5 @@
+#define pr_fmt(fmt) "gardenia: " fmt
+
 #include <linux/cpufreq.h>
 #include <linux/kthread.h>
 #include <linux/percpu-defs.h>
@@ -6,6 +8,7 @@
 #include <linux/input.h>
 #include <linux/sched/cpufreq.h>
 #include <trace/events/power.h>
+#include <uapi/linux/sched/types.h>
 
 /* Internal scheduler header (kernel/sched/sched.h) - this is where
  * map_util_freq() and arch_scale_thermal_pressure() actually live.
@@ -36,6 +39,13 @@ extern int sched_gaming_active;
 
 #define GARDENIA_TOUCH_BOOST_MS_DEFAULT	(150)	/* daily-use smoothness */
 #define GARDENIA_SCREEN_OFF_CAP_PCT_DEFAULT	(35)	/* pct of max_freq */
+
+/* Directional EMA on util: rises fast (kills PELT-lag stutter), decays
+ * slowly (no inter-frame sag / yoyo). Shift of 1 = half-weight on the
+ * new sample; 3 = eighth-weight. Learned from Vorpal's util smoothing.
+ */
+#define GARDENIA_EMA_UP_SHIFT_DEFAULT		(1)
+#define GARDENIA_EMA_DOWN_SHIFT_DEFAULT	(3)
 
 /* Adaptive thermal-feedback bias: every ADAPT_PERIOD, if thermal
  * pressure has been consistently present, nudge the effective bias
@@ -146,6 +156,8 @@ struct gardenia_tunables {
 	unsigned int gaming_exit_delay_ms;
 	unsigned int touch_boost_ms;
 	unsigned int screen_off_cap_pct;
+	unsigned int ema_up_shift;
+	unsigned int ema_down_shift;
 
 	bool thermal_aware;
 	bool screen_on;
@@ -184,6 +196,7 @@ struct gardenia_cpu {
 	struct update_util_data update_util;
 	struct gardenia_policy *gd_policy;
 	unsigned int cpu;
+	unsigned long smoothed_util;	/* directional EMA state */
 };
 
 static DEFINE_PER_CPU(struct gardenia_cpu, gardenia_cpu_list);
@@ -241,6 +254,15 @@ static bool gardenia_rate_limited(struct gardenia_policy *gd_policy,
 				   u64 time, unsigned int next_freq)
 {
 	s64 delta_ns = time - gd_policy->last_freq_update_time;
+
+	/* An external limits change (e.g. thermal engine lowering max_freq)
+	 * must take effect immediately - consume the flag once so we don't
+	 * bypass rate-limiting on every subsequent call.
+	 */
+	if (gd_policy->limits_changed) {
+		gd_policy->limits_changed = false;
+		return false;
+	}
 
 	if (next_freq > gd_policy->next_freq &&
 	    delta_ns < gd_policy->up_rate_delay_ns)
@@ -440,6 +462,25 @@ static void gardenia_queue_update(struct gardenia_policy *gd_policy)
 	irq_work_queue(&gd_policy->irq_work);
 }
 
+/* ---- Directional EMA util smoothing ------------------------------------ */
+
+static unsigned long gardenia_ema_smooth(struct gardenia_cpu *gd_cpu,
+					  unsigned long raw_util)
+{
+	struct gardenia_tunables *t = gd_cpu->gd_policy->tunables;
+	unsigned long prev = gd_cpu->smoothed_util;
+	unsigned int shift;
+
+	if (!prev) {
+		gd_cpu->smoothed_util = raw_util;
+		return raw_util;
+	}
+
+	shift = raw_util >= prev ? t->ema_up_shift : t->ema_down_shift;
+	gd_cpu->smoothed_util = prev + ((long)(raw_util - prev) >> shift);
+	return gd_cpu->smoothed_util;
+}
+
 /* ---- Fast path (per-cpu utilization callback) --------------------------- */
 
 static void gardenia_update_single_cpu(struct gardenia_cpu *gd_cpu,
@@ -453,6 +494,7 @@ static void gardenia_update_single_cpu(struct gardenia_cpu *gd_cpu,
 
 	max = arch_scale_cpu_capacity(gd_cpu->cpu);
 	util = sched_cpu_util(gd_cpu->cpu, max);
+	util = gardenia_ema_smooth(gd_cpu, util);
 
 	if (flags & SCHED_CPUFREQ_IOWAIT)
 		util = max(util, mult_frac(max, 60, 100));
@@ -538,6 +580,8 @@ GARDENIA_ATTR_RW(util_bias_pct);
 GARDENIA_ATTR_RW(max_step_pct);
 GARDENIA_ATTR_RW(hispeed_load);
 GARDENIA_ATTR_RW(hispeed_freq_pct);
+GARDENIA_ATTR_RW(ema_up_shift);
+GARDENIA_ATTR_RW(ema_down_shift);
 GARDENIA_ATTR_RW(gaming_exit_delay_ms);
 GARDENIA_ATTR_RW(screen_off_cap_pct);
 GARDENIA_ATTR_RW_BOOL(thermal_aware);
@@ -625,6 +669,8 @@ static struct attribute *gardenia_attrs[] = {
 	&max_step_pct_attr.attr,
 	&hispeed_load_attr.attr,
 	&hispeed_freq_pct_attr.attr,
+	&ema_up_shift_attr.attr,
+	&ema_down_shift_attr.attr,
 	&gaming_exit_delay_ms_attr.attr,
 	&touch_boost_ms_attr.attr,
 	&screen_off_cap_pct_attr.attr,
@@ -667,6 +713,8 @@ static struct gardenia_tunables *gardenia_tunables_alloc(struct cpufreq_policy *
 	t->max_step_pct			= GARDENIA_MAX_STEP_PCT_DEFAULT;
 	t->hispeed_load			= GARDENIA_HISPEED_LOAD_DEFAULT;
 	t->hispeed_freq_pct		= GARDENIA_HISPEED_FREQ_PCT_DEFAULT;
+	t->ema_up_shift			= GARDENIA_EMA_UP_SHIFT_DEFAULT;
+	t->ema_down_shift		= GARDENIA_EMA_DOWN_SHIFT_DEFAULT;
 	t->gaming_exit_delay_ms		= GARDENIA_GAMING_EXIT_DELAY_MS_DEFAULT;
 	t->touch_boost_ms		= GARDENIA_TOUCH_BOOST_MS_DEFAULT;
 	t->screen_off_cap_pct		= GARDENIA_SCREEN_OFF_CAP_PCT_DEFAULT;
@@ -691,17 +739,20 @@ static int gardenia_init(struct cpufreq_policy *policy)
 {
 	struct gardenia_policy *gd_policy;
 	struct gardenia_tunables *tunables;
-	struct sched_param param = { .sched_priority = MAX_RT_PRIO / 2 };
 	int cpu, ret;
 
+	cpufreq_enable_fast_switch(policy);
+
 	gd_policy = kzalloc(sizeof(*gd_policy), GFP_KERNEL);
-	if (!gd_policy)
-		return -ENOMEM;
+	if (!gd_policy) {
+		ret = -ENOMEM;
+		goto disable_fast_switch;
+	}
 
 	tunables = gardenia_tunables_alloc(policy);
 	if (!tunables) {
-		kfree(gd_policy);
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto free_policy;
 	}
 
 	gd_policy->policy = policy;
@@ -714,29 +765,50 @@ static int gardenia_init(struct cpufreq_policy *policy)
 	 */
 	gd_policy->is_little = cpumask_test_cpu(0, policy->related_cpus);
 	raw_spin_lock_init(&gd_policy->update_lock);
-	mutex_init(&gd_policy->work_lock);
 	gd_policy->last_gaming_state = -1;
 	gd_policy->next_freq = policy->cur;
 	gardenia_refresh_profile(gd_policy);
 
-	init_irq_work(&gd_policy->irq_work, gardenia_irq_work);
-	kthread_init_worker(&gd_policy->worker);
-	kthread_init_work(&gd_policy->work, gardenia_work);
+	/*
+	 * The kthread + irq_work slow path is only needed when the
+	 * driver can't fast-switch (frequency change may sleep). When
+	 * fast switch is available, skip it entirely - one less thread,
+	 * one less thing that can go wrong, and lower latency on every
+	 * frequency change since there's no work-queue hop.
+	 */
+	if (!policy->fast_switch_enabled) {
+		struct sched_attr attr = {
+			.size		= sizeof(struct sched_attr),
+			.sched_policy	= SCHED_DEADLINE,
+			.sched_flags	= SCHED_FLAG_SUGOV,
+			.sched_nice	= 0,
+			.sched_priority	= 0,
+			.sched_runtime	= NSEC_PER_MSEC,
+			.sched_deadline	= 10 * NSEC_PER_MSEC,
+			.sched_period	= 10 * NSEC_PER_MSEC,
+		};
 
-	gd_policy->thread = kthread_create(kthread_worker_fn, &gd_policy->worker,
-					    "gardenia:%d", policy->cpu);
-	if (IS_ERR(gd_policy->thread)) {
-		ret = PTR_ERR(gd_policy->thread);
-		kobject_put(&tunables->kobj);
-		kfree(gd_policy);
-		return ret;
+		mutex_init(&gd_policy->work_lock);
+		init_irq_work(&gd_policy->irq_work, gardenia_irq_work);
+		kthread_init_worker(&gd_policy->worker);
+		kthread_init_work(&gd_policy->work, gardenia_work);
+
+		gd_policy->thread = kthread_create(kthread_worker_fn,
+						    &gd_policy->worker,
+						    "gardenia:%d", policy->cpu);
+		if (IS_ERR(gd_policy->thread)) {
+			ret = PTR_ERR(gd_policy->thread);
+			goto free_tunables;
+		}
+
+		ret = sched_setattr_nocheck(gd_policy->thread, &attr);
+		if (ret) {
+			kthread_stop(gd_policy->thread);
+			pr_warn("failed to set SCHED_DEADLINE/SUGOV for kthread, using default priority\n");
+		}
+
+		wake_up_process(gd_policy->thread);
 	}
-
-	ret = sched_setscheduler_nocheck(gd_policy->thread, SCHED_FIFO, &param);
-	if (ret)
-		pr_warn("failed to set SCHED_FIFO for gardenia kthread\n");
-
-	wake_up_process(gd_policy->thread);
 
 	policy->governor_data = gd_policy;
 
@@ -757,9 +829,19 @@ static int gardenia_init(struct cpufreq_policy *policy)
 				ret);
 	}
 
-	pr_info("governor attached to policy cpu%d (%s cluster)\n",
-		policy->cpu, gd_policy->is_little ? "little" : "big");
+	pr_info("governor attached to policy cpu%d (%s cluster, %s switch)\n",
+		policy->cpu, gd_policy->is_little ? "little" : "big",
+		policy->fast_switch_enabled ? "fast" : "kthread");
 	return 0;
+
+free_tunables:
+	kobject_put(&tunables->kobj);
+free_policy:
+	kfree(gd_policy);
+disable_fast_switch:
+	cpufreq_disable_fast_switch(policy);
+	pr_err("gardenia: initialization failed (error %d)\n", ret);
+	return ret;
 }
 
 static void gardenia_exit(struct cpufreq_policy *policy)
@@ -775,12 +857,16 @@ static void gardenia_exit(struct cpufreq_policy *policy)
 	if (atomic_dec_return(&gardenia_input_refcount) == 0)
 		input_unregister_handler(&gardenia_input_handler);
 
-	kthread_flush_worker(&gd_policy->worker);
-	kthread_stop(gd_policy->thread);
+	if (!policy->fast_switch_enabled && gd_policy->thread) {
+		kthread_flush_worker(&gd_policy->worker);
+		kthread_stop(gd_policy->thread);
+		mutex_destroy(&gd_policy->work_lock);
+	}
 
 	kobject_put(&gd_policy->tunables->kobj);
 	kfree(gd_policy);
 	policy->governor_data = NULL;
+	cpufreq_disable_fast_switch(policy);
 }
 
 static int gardenia_start(struct cpufreq_policy *policy)
@@ -797,7 +883,10 @@ static void gardenia_stop(struct cpufreq_policy *policy)
 {
 	struct gardenia_policy *gd_policy = policy->governor_data;
 
-	kthread_cancel_work_sync(&gd_policy->work);
+	if (!policy->fast_switch_enabled) {
+		irq_work_sync(&gd_policy->irq_work);
+		kthread_cancel_work_sync(&gd_policy->work);
+	}
 }
 
 static void gardenia_limits(struct cpufreq_policy *policy)
@@ -827,3 +916,4 @@ cpufreq_governor_exit(gardenia_gov);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("cpufreq governor: gardenia (power-save + gaming switch, touch-boosted, tunable)");
+
