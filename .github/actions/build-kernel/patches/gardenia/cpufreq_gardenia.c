@@ -1,3 +1,22 @@
+#define pr_fmt(fmt) "gardenia: " fmt
+
+#include <linux/cpufreq.h>
+#include <linux/kthread.h>
+#include <linux/percpu-defs.h>
+#include <linux/slab.h>
+#include <linux/irq_work.h>
+#include <linux/input.h>
+#include <linux/sched/cpufreq.h>
+#include <linux/tick.h>
+#include <trace/events/power.h>
+#include <uapi/linux/sched/types.h>
+
+/* Internal scheduler header (kernel/sched/sched.h) - this is where
+ * map_util_freq() and arch_scale_thermal_pressure() actually live.
+ * sched_cpu_util() itself is a public API (include/linux/sched.h)
+ * but this file lives in kernel/sched/ alongside schedutil/vorpal/
+ * reflex, all of which need this header for the same reason.
+ */
 #include "sched.h"
 
 extern int sched_gaming_active;
