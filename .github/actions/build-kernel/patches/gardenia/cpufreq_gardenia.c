@@ -1,13 +1,13 @@
 #define pr_fmt(fmt) "gardenia: " fmt
 
 #include <linux/cpufreq.h>
+#include "sched.h"
 #include <linux/kthread.h>
 #include <linux/percpu-defs.h>
 #include <linux/slab.h>
 #include <linux/irq_work.h>
 #include <linux/input.h>
 #include <linux/sched/cpufreq.h>
-#include <linux/thermal_pressure.h>
 #include <trace/events/power.h>
 
 extern int sched_gaming_active;
