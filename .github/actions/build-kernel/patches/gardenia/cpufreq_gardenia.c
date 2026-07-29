@@ -1,7 +1,4 @@
-#define pr_fmt(fmt) "gardenia: " fmt
-
 #include <linux/cpufreq.h>
-#include "sched.h"
 #include <linux/kthread.h>
 #include <linux/percpu-defs.h>
 #include <linux/slab.h>
@@ -9,6 +6,14 @@
 #include <linux/input.h>
 #include <linux/sched/cpufreq.h>
 #include <trace/events/power.h>
+
+/* Internal scheduler header (kernel/sched/sched.h) - this is where
+ * map_util_freq() and arch_scale_thermal_pressure() actually live.
+ * sched_cpu_util() itself is a public API (include/linux/sched.h)
+ * but this file lives in kernel/sched/ alongside schedutil/vorpal/
+ * reflex, all of which need this header for the same reason.
+ */
+#include "sched.h"
 
 extern int sched_gaming_active;
 
@@ -447,9 +452,7 @@ static void gardenia_update_single_cpu(struct gardenia_cpu *gd_cpu,
 	gardenia_refresh_profile(gd_policy);
 
 	max = arch_scale_cpu_capacity(gd_cpu->cpu);
-	util = cpu_util_cfs(gd_cpu->cpu);
-	util = effective_cpu_util(gd_cpu->cpu, util, &max, NULL, NULL);
-	util = max(util, boosted_cpu_util(gd_cpu->cpu));
+	util = sched_cpu_util(gd_cpu->cpu, max);
 
 	if (flags & SCHED_CPUFREQ_IOWAIT)
 		util = max(util, mult_frac(max, 60, 100));
@@ -780,7 +783,29 @@ static void gardenia_exit(struct cpufreq_policy *policy)
 	policy->governor_data = NULL;
 }
 
-ick, flags);
+static int gardenia_start(struct cpufreq_policy *policy)
+{
+	struct gardenia_policy *gd_policy = policy->governor_data;
+
+	gd_policy->last_freq_update_time = 0;
+	gd_policy->next_freq = policy->cur;
+	gd_policy->need_freq_update = true;
+	return 0;
+}
+
+static void gardenia_stop(struct cpufreq_policy *policy)
+{
+	struct gardenia_policy *gd_policy = policy->governor_data;
+
+	kthread_cancel_work_sync(&gd_policy->work);
+}
+
+static void gardenia_limits(struct cpufreq_policy *policy)
+{
+	struct gardenia_policy *gd_policy = policy->governor_data;
+	unsigned long flags;
+
+	raw_spin_lock_irqsave(&gd_policy->update_lock, flags);
 	gd_policy->limits_changed = true;
 	gd_policy->need_freq_update = true;
 	raw_spin_unlock_irqrestore(&gd_policy->update_lock, flags);
