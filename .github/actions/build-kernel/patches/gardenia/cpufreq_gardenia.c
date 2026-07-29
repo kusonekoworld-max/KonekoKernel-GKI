@@ -1,35 +1,17 @@
-#define pr_fmt(fmt) "gardenia: " fmt
-
-#include <linux/cpufreq.h>
-#include <linux/kthread.h>
-#include <linux/percpu-defs.h>
-#include <linux/slab.h>
-#include <linux/irq_work.h>
-#include <linux/input.h>
-#include <linux/sched/cpufreq.h>
-#include <trace/events/power.h>
-#include <uapi/linux/sched/types.h>
-
-/* Internal scheduler header (kernel/sched/sched.h) - this is where
- * map_util_freq() and arch_scale_thermal_pressure() actually live.
- * sched_cpu_util() itself is a public API (include/linux/sched.h)
- * but this file lives in kernel/sched/ alongside schedutil/vorpal/
- * reflex, all of which need this header for the same reason.
- */
 #include "sched.h"
 
 extern int sched_gaming_active;
 
 /* ---- Defaults (overridable at runtime via sysfs) --------------------- */
 
-#define GARDENIA_UP_RATE_LIMIT_NORMAL_US	(20000)
+#define GARDENIA_UP_RATE_LIMIT_NORMAL_US	(8000)
 #define GARDENIA_DOWN_RATE_LIMIT_NORMAL_US	(50000)
 #define GARDENIA_UP_RATE_LIMIT_GAME_US		(2000)
 #define GARDENIA_DOWN_RATE_LIMIT_GAME_US	(8000)
 
-#define GARDENIA_UTIL_BIAS_PCT_DEFAULT		(88)	/* big cluster, normal */
+#define GARDENIA_UTIL_BIAS_PCT_DEFAULT		(92)	/* big cluster, normal */
 #define GARDENIA_UTIL_BIAS_LITTLE_PCT_DEFAULT	(96)	/* little cluster, normal */
-#define GARDENIA_MAX_STEP_PCT_DEFAULT		(60)	/* normal profile */
+#define GARDENIA_MAX_STEP_PCT_DEFAULT		(80)	/* normal profile */
 
 #define GARDENIA_HISPEED_LOAD_DEFAULT		(85)	/* pct, gaming only */
 #define GARDENIA_HISPEED_FREQ_PCT_DEFAULT	(70)	/* pct of max_freq */
@@ -37,28 +19,20 @@ extern int sched_gaming_active;
 #define GARDENIA_THERMAL_DISCOUNT_MAX_PCT	(25)	/* extra cut at full throttle */
 #define GARDENIA_GAMING_EXIT_DELAY_MS_DEFAULT	(3000)	/* gaming exit hysteresis */
 
-#define GARDENIA_TOUCH_BOOST_MS_DEFAULT	(150)	/* daily-use smoothness */
+#define GARDENIA_TOUCH_BOOST_MS_DEFAULT	(220)	/* daily-use smoothness */
 #define GARDENIA_SCREEN_OFF_CAP_PCT_DEFAULT	(35)	/* pct of max_freq */
 
 /* Directional EMA on util: rises fast (kills PELT-lag stutter), decays
  * slowly (no inter-frame sag / yoyo). Shift of 1 = half-weight on the
  * new sample; 3 = eighth-weight. Learned from Vorpal's util smoothing.
  */
-#define GARDENIA_EMA_UP_SHIFT_DEFAULT		(1)
+#define GARDENIA_EMA_UP_SHIFT_DEFAULT		(0)
 #define GARDENIA_EMA_DOWN_SHIFT_DEFAULT	(3)
 
-/* Adaptive thermal-feedback bias: every ADAPT_PERIOD, if thermal
- * pressure has been consistently present, nudge the effective bias
- * further down (more discount, more headroom below throttle); if
- * pressure has been consistently absent, nudge it back up toward the
- * tunable baseline (more responsive). Bounded so it can never remove
- * more than ADAPT_MAX_DELTA points of bias, and never override the
- * gaming/touch-boost paths, which always bypass bias entirely.
+/* Matches schedutil/Reflex convention: smallest IOWait boost step,
+ * doubles on repeated IOWait ticks, halves when they stop.
  */
-#define GARDENIA_ADAPT_PERIOD_NS		(2000000000ULL) /* 2s */
-#define GARDENIA_ADAPT_STEP			(2)   /* pct per period */
-#define GARDENIA_ADAPT_MAX_DELTA		(15)  /* pct, floor of discount */
-#define GARDENIA_ADAPT_PRESSURE_THRESHOLD	(10)  /* pct of max capacity */
+#define IOWAIT_BOOST_MIN			(SCHED_CAPACITY_SCALE / 8)
 
 /* ---- Global touch-boost state (shared across all policies/clusters) --- */
 
@@ -161,7 +135,6 @@ struct gardenia_tunables {
 
 	bool thermal_aware;
 	bool screen_on;
-	bool adaptive_enabled;
 };
 
 struct gardenia_policy {
@@ -178,10 +151,6 @@ struct gardenia_policy {
 	int last_gaming_state;
 	u64 last_gaming_active_ns;
 
-	/* self-adjusting thermal-feedback bias, see gardenia_adapt() */
-	int adaptive_bias_delta;
-	u64 last_adapt_ns;
-
 	struct irq_work irq_work;
 	struct kthread_work work;
 	struct kthread_worker worker;
@@ -197,6 +166,15 @@ struct gardenia_cpu {
 	struct gardenia_policy *gd_policy;
 	unsigned int cpu;
 	unsigned long smoothed_util;	/* directional EMA state */
+
+	/* Decaying IOWait boost (Reflex/schedutil pattern) */
+	bool iowait_boost_pending;
+	unsigned int iowait_boost;
+	u64 last_update;
+
+#ifdef CONFIG_NO_HZ_COMMON
+	unsigned long saved_idle_calls;
+#endif
 };
 
 static DEFINE_PER_CPU(struct gardenia_cpu, gardenia_cpu_list);
@@ -292,45 +270,6 @@ static unsigned long gardenia_thermal_discount(struct gardenia_policy *gd_policy
 	return max - mult_frac(pressure, GARDENIA_THERMAL_DISCOUNT_MAX_PCT, 100);
 }
 
-/*
- * Adaptive feedback: runs at most once per GARDENIA_ADAPT_PERIOD_NS
- * per policy. Reads current thermal pressure (already sampled for
- * gardenia_thermal_discount - this is a second, slower-timescale
- * read, cheap and fine to duplicate) and walks adaptive_bias_delta
- * one step toward more or less discount. This is a bounded control
- * loop, not a predictive/learned model - it only ever reacts to the
- * thermal state that already exists right now.
- */
-static void gardenia_adapt(struct gardenia_policy *gd_policy, int cpu,
-			    unsigned long max)
-{
-	struct gardenia_tunables *t = gd_policy->tunables;
-	unsigned long pressure;
-	u64 now;
-
-	if (!t->adaptive_enabled)
-		return;
-
-	now = local_clock();
-	if (now - gd_policy->last_adapt_ns < GARDENIA_ADAPT_PERIOD_NS)
-		return;
-	gd_policy->last_adapt_ns = now;
-
-	pressure = t->thermal_aware ? arch_scale_thermal_pressure(cpu) : 0;
-
-	if (pressure * 100 > max * GARDENIA_ADAPT_PRESSURE_THRESHOLD) {
-		/* under thermal pressure: increase discount */
-		gd_policy->adaptive_bias_delta =
-			max_t(int, -GARDENIA_ADAPT_MAX_DELTA,
-			      gd_policy->adaptive_bias_delta - GARDENIA_ADAPT_STEP);
-	} else {
-		/* no pressure: relax back toward the tunable baseline */
-		gd_policy->adaptive_bias_delta =
-			min_t(int, 0,
-			      gd_policy->adaptive_bias_delta + GARDENIA_ADAPT_STEP);
-	}
-}
-
 /* ---- Frequency selection ----------------------------------------------- */
 
 static unsigned int gardenia_apply_step_limit(struct gardenia_policy *gd_policy,
@@ -390,16 +329,11 @@ static unsigned int gardenia_next_freq(struct gardenia_policy *gd_policy,
 	bool gaming = gardenia_gaming(gd_policy);
 	bool boosted = gardenia_touch_boosted();
 
-	gardenia_adapt(gd_policy, cpu, max);
-
 	if (!gaming && !boosted) {
-		unsigned int base_bias = gd_policy->is_little ?
+		unsigned int bias = gd_policy->is_little ?
 			max(t->util_bias_pct, GARDENIA_UTIL_BIAS_LITTLE_PCT_DEFAULT) :
 			t->util_bias_pct;
-		int effective_bias = clamp_t(int,
-					      (int)base_bias + gd_policy->adaptive_bias_delta,
-					      50, 100);
-		next_util = (util * (unsigned int)effective_bias) / 100;
+		next_util = (util * bias) / 100;
 	}
 
 	freq = map_util_freq(next_util, freq, adj_max);
@@ -481,25 +415,115 @@ static unsigned long gardenia_ema_smooth(struct gardenia_cpu *gd_cpu,
 	return gd_cpu->smoothed_util;
 }
 
+/* ---- Hold frequency across brief idle blips (schedutil/Reflex pattern) - */
+
+#ifdef CONFIG_NO_HZ_COMMON
+static bool gardenia_hold_freq(struct gardenia_cpu *gd_cpu)
+{
+	unsigned long idle_calls;
+	bool ret;
+
+	idle_calls = tick_nohz_get_idle_calls_cpu(gd_cpu->cpu);
+	ret = idle_calls == gd_cpu->saved_idle_calls;
+	gd_cpu->saved_idle_calls = idle_calls;
+	return ret;
+}
+#else
+static inline bool gardenia_hold_freq(struct gardenia_cpu *gd_cpu) { return false; }
+#endif
+
+/* ---- Decaying IOWait boost ---------------------------------------------- */
+
+static bool gardenia_iowait_reset(struct gardenia_cpu *gd_cpu, u64 time,
+				   bool set_iowait_boost)
+{
+	s64 delta_ns = time - gd_cpu->last_update;
+
+	if (delta_ns <= TICK_NSEC)
+		return false;
+
+	gd_cpu->iowait_boost = set_iowait_boost ? IOWAIT_BOOST_MIN : 0;
+	gd_cpu->iowait_boost_pending = set_iowait_boost;
+	return true;
+}
+
+static void gardenia_iowait_boost(struct gardenia_cpu *gd_cpu, u64 time,
+				   unsigned int flags)
+{
+	bool set_iowait_boost = flags & SCHED_CPUFREQ_IOWAIT;
+
+	if (gd_cpu->iowait_boost &&
+	    gardenia_iowait_reset(gd_cpu, time, set_iowait_boost))
+		return;
+
+	if (!set_iowait_boost)
+		return;
+
+	if (gd_cpu->iowait_boost_pending)
+		return;
+	gd_cpu->iowait_boost_pending = true;
+
+	if (gd_cpu->iowait_boost) {
+		gd_cpu->iowait_boost = min_t(unsigned int,
+					      gd_cpu->iowait_boost << 1,
+					      SCHED_CAPACITY_SCALE);
+		return;
+	}
+
+	gd_cpu->iowait_boost = IOWAIT_BOOST_MIN;
+}
+
+static unsigned long gardenia_iowait_apply(struct gardenia_cpu *gd_cpu,
+					    u64 time, unsigned long max)
+{
+	if (!gd_cpu->iowait_boost)
+		return 0;
+
+	if (gardenia_iowait_reset(gd_cpu, time, false))
+		return 0;
+
+	if (!gd_cpu->iowait_boost_pending) {
+		gd_cpu->iowait_boost >>= 1;
+		if (gd_cpu->iowait_boost < IOWAIT_BOOST_MIN) {
+			gd_cpu->iowait_boost = 0;
+			return 0;
+		}
+	}
+
+	gd_cpu->iowait_boost_pending = false;
+	return (gd_cpu->iowait_boost * max) >> SCHED_CAPACITY_SHIFT;
+}
+
 /* ---- Fast path (per-cpu utilization callback) --------------------------- */
 
 static void gardenia_update_single_cpu(struct gardenia_cpu *gd_cpu,
 					 u64 time, unsigned int flags)
 {
 	struct gardenia_policy *gd_policy = gd_cpu->gd_policy;
-	unsigned long util, max;
+	unsigned long util, max, boost;
 	unsigned int next_f;
 
 	gardenia_refresh_profile(gd_policy);
 
 	max = arch_scale_cpu_capacity(gd_cpu->cpu);
+
+	gardenia_iowait_boost(gd_cpu, time, flags);
+	boost = gardenia_iowait_apply(gd_cpu, time, max);
+	gd_cpu->last_update = time;
+
 	util = sched_cpu_util(gd_cpu->cpu, max);
+	util = max(util, boost);
 	util = gardenia_ema_smooth(gd_cpu, util);
 
-	if (flags & SCHED_CPUFREQ_IOWAIT)
-		util = max(util, mult_frac(max, 60, 100));
-
 	next_f = gardenia_next_freq(gd_policy, gd_cpu->cpu, util, max);
+
+	/* Don't let a brief idle blip drop freq below what's already
+	 * running - avoids the measure-low / correct-next-tick sawtooth
+	 * that reads as micro-stutter.
+	 */
+	if (gardenia_hold_freq(gd_cpu) && next_f < gd_policy->next_freq &&
+	    !gd_policy->need_freq_update)
+		next_f = gd_policy->next_freq;
 
 	if (gardenia_rate_limited(gd_policy, time, next_f))
 		return;
@@ -586,22 +610,6 @@ GARDENIA_ATTR_RW(gaming_exit_delay_ms);
 GARDENIA_ATTR_RW(screen_off_cap_pct);
 GARDENIA_ATTR_RW_BOOL(thermal_aware);
 GARDENIA_ATTR_RW_BOOL(screen_on);
-GARDENIA_ATTR_RW_BOOL(adaptive_enabled);
-
-/* Read-only: shows what the adaptive loop is currently doing, in
- * percentage points subtracted from util_bias_pct. Useful to confirm
- * it's actually reacting instead of just trusting it blindly.
- */
-static ssize_t adaptive_bias_delta_show(struct kobject *kobj,
-					 struct kobj_attribute *attr,
-					 char *buf)
-{
-	struct gardenia_tunables *t = container_of(kobj,
-					struct gardenia_tunables, kobj);
-	return sprintf(buf, "%d\n", READ_ONCE(t->gd_policy->adaptive_bias_delta));
-}
-static struct kobj_attribute adaptive_bias_delta_attr =
-	__ATTR(adaptive_bias_delta, 0444, adaptive_bias_delta_show, NULL);
 
 /*
  * touch_boost_ms is stored per-policy (so it shows up under every
@@ -676,8 +684,6 @@ static struct attribute *gardenia_attrs[] = {
 	&screen_off_cap_pct_attr.attr,
 	&thermal_aware_attr.attr,
 	&screen_on_attr.attr,
-	&adaptive_enabled_attr.attr,
-	&adaptive_bias_delta_attr.attr,
 	&gaming_mode_attr.attr,
 	NULL
 };
@@ -720,7 +726,6 @@ static struct gardenia_tunables *gardenia_tunables_alloc(struct cpufreq_policy *
 	t->screen_off_cap_pct		= GARDENIA_SCREEN_OFF_CAP_PCT_DEFAULT;
 	t->thermal_aware		= true;
 	t->screen_on			= true;
-	t->adaptive_enabled		= true;
 
 	ret = kobject_init_and_add(&t->kobj, &gardenia_tunables_ktype,
 				    get_governor_parent_kobj(policy),
@@ -916,4 +921,3 @@ cpufreq_governor_exit(gardenia_gov);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("cpufreq governor: gardenia (power-save + gaming switch, touch-boosted, tunable)");
-
