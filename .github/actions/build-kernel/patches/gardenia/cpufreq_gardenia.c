@@ -72,6 +72,19 @@ extern int sched_gaming_active;
 #define GARDENIA_TOUCH_BOOST_MS_DEFAULT	(220)	/* daily-use smoothness */
 #define GARDENIA_SCREEN_OFF_CAP_PCT_DEFAULT	(35)	/* pct of max_freq */
 
+/* Daily UI ramp-assist: a sharp rise in util% - not just a fresh touch
+ * event - re-arms the same "UI is active" floor. Catches fling-scrolls,
+ * open/close animations, and caption draws that touch-boost alone
+ * misses because there's no touch event mid-gesture. Learned from
+ * Vorpal's ramp detection + per-cluster daily caps/floors.
+ */
+#define GARDENIA_RAMP_DELTA_PCT_DEFAULT	(15)	/* upct jump to re-arm */
+#define GARDENIA_UI_BOOST_MS_DEFAULT		(200)	/* how long the floor holds */
+#define GARDENIA_LITTLE_CAP_PCT_DEFAULT	(55)	/* little cap, UI idle */
+#define GARDENIA_LITTLE_BOOST_CAP_PCT_DEFAULT	(85)	/* little cap, UI active */
+#define GARDENIA_LITTLE_UI_FLOOR_PCT_DEFAULT	(35)	/* little floor, UI active */
+#define GARDENIA_BIG_UI_FLOOR_PCT_DEFAULT	(25)	/* big floor, UI active */
+
 /* Directional EMA on util: rises fast (kills PELT-lag stutter), decays
  * slowly (no inter-frame sag / yoyo). Shift of 1 = half-weight on the
  * new sample; 3 = eighth-weight. Learned from Vorpal's util smoothing.
@@ -180,6 +193,12 @@ struct gardenia_tunables {
 	unsigned int gaming_exit_delay_ms;
 	unsigned int touch_boost_ms;
 	unsigned int screen_off_cap_pct;
+	unsigned int ramp_delta_pct;
+	unsigned int ui_boost_ms;
+	unsigned int little_cap_pct;
+	unsigned int little_boost_cap_pct;
+	unsigned int little_ui_floor_pct;
+	unsigned int big_ui_floor_pct;
 	unsigned int ema_up_shift;
 	unsigned int ema_down_shift;
 
@@ -204,6 +223,10 @@ struct gardenia_policy {
 	/* thermal step controller state - see gardenia_thermal_discount() */
 	int thermal_applied_pct;
 	u64 thermal_step_ns;
+
+	/* daily UI ramp-assist state - see gardenia_apply_daily_shape() */
+	unsigned int prev_upct;
+	u64 ui_boost_end_ns;
 
 	struct irq_work irq_work;
 	struct kthread_work work;
@@ -447,6 +470,64 @@ static unsigned long gardenia_apply_headroom(struct gardenia_policy *gd_policy,
 	return min(util + (util >> 6), max);
 }
 
+/*
+ * A sharp rise in util% - not just a fresh touch event - re-arms the
+ * same "UI is active" window that touch-boost uses. Catches a fling
+ * scroll or an open/close animation mid-gesture, where there's no new
+ * touch event to trigger gardenia_touch_boosted() but the frame is
+ * just as real. Learned from Vorpal's ramp-detection heuristic.
+ */
+static bool gardenia_ui_ramp_active(struct gardenia_policy *gd_policy,
+				     unsigned long util, unsigned long max,
+				     u64 time)
+{
+	struct gardenia_tunables *t = gd_policy->tunables;
+	unsigned int upct = max ? (unsigned int)(util * 100 / max) : 0;
+
+	if (upct > gd_policy->prev_upct &&
+	    upct - gd_policy->prev_upct >= t->ramp_delta_pct)
+		gd_policy->ui_boost_end_ns = time +
+			(u64)t->ui_boost_ms * NSEC_PER_MSEC;
+
+	gd_policy->prev_upct = upct;
+
+	return time < gd_policy->ui_boost_end_ns;
+}
+
+/*
+ * Explicit daily-profile shaping, separate from headroom: little
+ * cluster gets a hard cap normally (keeps it out of the power-hungry
+ * top end for background/idle-ish work) that opens up while UI is
+ * active; both clusters get a floor while UI is active so a fresh
+ * gesture never has to climb from a cold/low frequency. Never applied
+ * during gaming - hispeed floor already owns that job there.
+ */
+static unsigned int gardenia_apply_daily_shape(struct gardenia_policy *gd_policy,
+						 unsigned int freq, bool ui_active)
+{
+	struct gardenia_tunables *t = gd_policy->tunables;
+	unsigned int max_freq = gd_policy->policy->cpuinfo.max_freq;
+	unsigned int cap, floor_f;
+
+	if (gd_policy->is_little) {
+		cap = mult_frac(max_freq, ui_active ? t->little_boost_cap_pct :
+						       t->little_cap_pct, 100);
+		if (freq > cap)
+			freq = cap;
+		if (ui_active) {
+			floor_f = mult_frac(max_freq, t->little_ui_floor_pct, 100);
+			if (freq < floor_f)
+				freq = floor_f;
+		}
+	} else if (ui_active) {
+		floor_f = mult_frac(max_freq, t->big_ui_floor_pct, 100);
+		if (freq < floor_f)
+			freq = floor_f;
+	}
+
+	return freq;
+}
+
 static unsigned int gardenia_next_freq(struct gardenia_policy *gd_policy,
 					int cpu, unsigned long util,
 					unsigned long max, u64 time)
@@ -459,6 +540,8 @@ static unsigned int gardenia_next_freq(struct gardenia_policy *gd_policy,
 	unsigned int floor_freq, screen_cap, target;
 	bool gaming = gardenia_gaming(gd_policy);
 	bool boosted = gardenia_touch_boosted();
+	bool ramp_active = gardenia_ui_ramp_active(gd_policy, util, max, time);
+	bool ui_active = boosted || ramp_active;
 
 	next_util = boosted ? util :
 		    gardenia_apply_headroom(gd_policy, util, max, gaming);
@@ -477,6 +560,9 @@ static unsigned int gardenia_next_freq(struct gardenia_policy *gd_policy,
 	floor_freq = gardenia_hispeed_floor(gd_policy, util, max, gaming);
 	if (floor_freq)
 		target = max(target, floor_freq);
+
+	if (!gaming)
+		target = gardenia_apply_daily_shape(gd_policy, target, ui_active);
 
 	/* screen-off cap always wins - it's a hard ceiling, not a floor */
 	screen_cap = gardenia_screen_off_cap(gd_policy);
@@ -743,6 +829,12 @@ GARDENIA_ATTR_RW(ema_up_shift);
 GARDENIA_ATTR_RW(ema_down_shift);
 GARDENIA_ATTR_RW(gaming_exit_delay_ms);
 GARDENIA_ATTR_RW(screen_off_cap_pct);
+GARDENIA_ATTR_RW(ramp_delta_pct);
+GARDENIA_ATTR_RW(ui_boost_ms);
+GARDENIA_ATTR_RW(little_cap_pct);
+GARDENIA_ATTR_RW(little_boost_cap_pct);
+GARDENIA_ATTR_RW(little_ui_floor_pct);
+GARDENIA_ATTR_RW(big_ui_floor_pct);
 GARDENIA_ATTR_RW_BOOL(thermal_aware);
 GARDENIA_ATTR_RW_BOOL(screen_on);
 
@@ -817,6 +909,12 @@ static struct attribute *gardenia_attrs[] = {
 	&gaming_exit_delay_ms_attr.attr,
 	&touch_boost_ms_attr.attr,
 	&screen_off_cap_pct_attr.attr,
+	&ramp_delta_pct_attr.attr,
+	&ui_boost_ms_attr.attr,
+	&little_cap_pct_attr.attr,
+	&little_boost_cap_pct_attr.attr,
+	&little_ui_floor_pct_attr.attr,
+	&big_ui_floor_pct_attr.attr,
 	&thermal_aware_attr.attr,
 	&screen_on_attr.attr,
 	&gaming_mode_attr.attr,
@@ -859,6 +957,12 @@ static struct gardenia_tunables *gardenia_tunables_alloc(struct cpufreq_policy *
 	t->gaming_exit_delay_ms		= GARDENIA_GAMING_EXIT_DELAY_MS_DEFAULT;
 	t->touch_boost_ms		= GARDENIA_TOUCH_BOOST_MS_DEFAULT;
 	t->screen_off_cap_pct		= GARDENIA_SCREEN_OFF_CAP_PCT_DEFAULT;
+	t->ramp_delta_pct		= GARDENIA_RAMP_DELTA_PCT_DEFAULT;
+	t->ui_boost_ms			= GARDENIA_UI_BOOST_MS_DEFAULT;
+	t->little_cap_pct		= GARDENIA_LITTLE_CAP_PCT_DEFAULT;
+	t->little_boost_cap_pct	= GARDENIA_LITTLE_BOOST_CAP_PCT_DEFAULT;
+	t->little_ui_floor_pct		= GARDENIA_LITTLE_UI_FLOOR_PCT_DEFAULT;
+	t->big_ui_floor_pct		= GARDENIA_BIG_UI_FLOOR_PCT_DEFAULT;
 	t->thermal_aware		= true;
 	t->screen_on			= true;
 
