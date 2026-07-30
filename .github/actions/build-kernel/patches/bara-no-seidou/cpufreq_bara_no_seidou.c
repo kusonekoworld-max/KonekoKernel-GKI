@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (C) 2026 kusonekoworld
+ * Copyright (C) 2026 kusonekoworld-max
  *
  * CPUFreq governor "bara-no-seidou"
  *
