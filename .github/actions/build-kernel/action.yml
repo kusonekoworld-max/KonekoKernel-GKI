@@ -127,7 +127,6 @@ runs:
           exit 1
         fi
 
-
     - name: 'Inject MomenToMoiX Driver'
       shell: bash
       run: |
