@@ -40,6 +40,9 @@
 #include <linux/input.h>
 #include <linux/sched/cpufreq.h>
 #include <linux/tick.h>
+#ifdef CONFIG_PSI
+#include <linux/psi.h>
+#endif
 #include <trace/events/power.h>
 #include <uapi/linux/sched/types.h>
 
@@ -84,6 +87,15 @@ extern int sched_gaming_active;
 #define GARDENIA_LITTLE_BOOST_CAP_PCT_DEFAULT	(85)	/* little cap, UI active */
 #define GARDENIA_LITTLE_UI_FLOOR_PCT_DEFAULT	(35)	/* little floor, UI active */
 #define GARDENIA_BIG_UI_FLOOR_PCT_DEFAULT	(25)	/* big floor, UI active */
+
+/* PSI-CPU sustained-pressure floor - opt-in, off by default (0 =
+ * disabled). See gardenia_psi_floor() for why the threshold matters
+ * and why the default is conservative.
+ */
+#define GARDENIA_PSI_CPU_FLOOR_THRESH_DEFAULT	(0)
+#define GARDENIA_PSI_CPU_FLOOR_PCT_DEFAULT	(70)
+#define GARDENIA_PSI_MEM_CAP_THRESH_DEFAULT	(0)
+#define GARDENIA_PSI_MEM_CAP_PCT_DEFAULT	(80)
 
 /* Directional EMA on util: rises fast (kills PELT-lag stutter), decays
  * slowly (no inter-frame sag / yoyo). Shift of 1 = half-weight on the
@@ -199,6 +211,10 @@ struct gardenia_tunables {
 	unsigned int little_boost_cap_pct;
 	unsigned int little_ui_floor_pct;
 	unsigned int big_ui_floor_pct;
+	unsigned int psi_cpu_floor_thresh;
+	unsigned int psi_cpu_floor_pct;
+	unsigned int psi_mem_cap_thresh;
+	unsigned int psi_mem_cap_pct;
 	unsigned int ema_up_shift;
 	unsigned int ema_down_shift;
 
@@ -227,6 +243,7 @@ struct gardenia_policy {
 	/* daily UI ramp-assist state - see gardenia_apply_daily_shape() */
 	unsigned int prev_upct;
 	u64 ui_boost_end_ns;
+	bool screen_on_last;
 
 	struct irq_work irq_work;
 	struct kthread_work work;
@@ -282,10 +299,148 @@ static bool gardenia_gaming(struct gardenia_policy *gd_policy)
 	       (u64)t->gaming_exit_delay_ms * NSEC_PER_MSEC;
 }
 
+/*
+ * On the screen-off -> screen-on edge, stale hysteresis/decay state
+ * from before a (possibly long) suspend must not leak into the first
+ * post-resume ticks - the device may have fully cooled, the gaming
+ * exit-grace timer may be stamped from hours ago, and a stale
+ * ui_boost_end_ns could either wrongly hold a floor or wrongly miss
+ * arming one. Learned directly from Zenith's M7/M7b audit fix, which
+ * documents exactly this class of bug (stale pre-suspend state biasing
+ * the first post-resume decision window).
+ */
+/* ---- PSI-CPU sustained-pressure floor ----------------------------------- */
+
+/*
+ * System-wide CPU "some" pressure, 10s EWMA, as an integer percentage.
+ * Returns 0 when CONFIG_PSI is off, when PSI is disabled at runtime
+ * (psi_disabled static key), or on any kernel where psi_system isn't
+ * visible to this translation unit - all of which make the floor
+ * below a permanent no-op rather than a build failure. Read pattern
+ * (rcu_read_lock + READ_ONCE on the averaging word) mirrors Zenith's
+ * zenith_psi_cpu_some_pct(), simplified to system-wide only (no
+ * cgroup-v2 group picking - Gardenia has no equivalent config surface
+ * for that yet).
+ */
+static inline unsigned int gardenia_psi_cpu_pct(void)
+{
+#ifdef CONFIG_PSI
+	unsigned long avg;
+
+	if (static_branch_likely(&psi_disabled))
+		return 0;
+
+	rcu_read_lock();
+	avg = READ_ONCE(psi_system.avg[PSI_CPU_SOME][0]);
+	rcu_read_unlock();
+	return (unsigned int)LOAD_INT(avg);
+#else
+	return 0;
+#endif
+}
+
+/* Same shape as gardenia_psi_cpu_pct() for the PSI_MEM_SOME dimension -
+ * feeds gardenia_psi_mem_cap() below, the inverse of the CPU floor:
+ * heavy paging means the CPU is waiting on memory, so pushing freq up
+ * just deepens the stall for no gain.
+ */
+static inline unsigned int gardenia_psi_mem_pct(void)
+{
+#ifdef CONFIG_PSI
+	unsigned long avg;
+
+	if (static_branch_likely(&psi_disabled))
+		return 0;
+
+	rcu_read_lock();
+	avg = READ_ONCE(psi_system.avg[PSI_MEM_SOME][0]);
+	rcu_read_unlock();
+	return (unsigned int)LOAD_INT(avg);
+#else
+	return 0;
+#endif
+}
+
+/*
+ * PSI's 10s smoothing window is too slow for sub-second decisions -
+ * by design this only fires for *sustained* CPU pressure (background
+ * sync fighting the foreground app, multitasking with a background
+ * compile/export, etc.) where instantaneous util already looks "fine"
+ * per-tick but tasks have been queueing for seconds. Opt-in (default
+ * threshold 0 = off): PSI pressure is a real but blunt signal, and an
+ * unconditional floor here would fight the whole headroom/thermal
+ * design elsewhere in the file. Never applied during gaming - gaming
+ * already gets its own generous headroom and hispeed floor.
+ */
+static unsigned int gardenia_psi_floor(struct gardenia_policy *gd_policy,
+					bool gaming)
+{
+	struct gardenia_tunables *t = gd_policy->tunables;
+	unsigned int max_freq = gd_policy->policy->cpuinfo.max_freq;
+
+	if (gaming || !t->psi_cpu_floor_thresh)
+		return 0;
+
+	if (gardenia_psi_cpu_pct() < t->psi_cpu_floor_thresh)
+		return 0;
+
+	return mult_frac(max_freq, t->psi_cpu_floor_pct, 100);
+}
+
+/*
+ * Inverse of gardenia_psi_floor(): sustained memory pressure means the
+ * CPU is stalled on paging/swap, not short on clock - a cap here, not
+ * a floor. Opt-in (threshold 0 = off) for the same reason as the CPU
+ * floor: PSI is a real but blunt 10s-smoothed signal. Applies during
+ * gaming too (unlike the daily-only UI shaping) since a genuinely
+ * thrashing device benefits from backing off regardless of mode -
+ * more clock cannot fix a memory stall.
+ */
+static unsigned int gardenia_psi_mem_cap(struct gardenia_policy *gd_policy)
+{
+	struct gardenia_tunables *t = gd_policy->tunables;
+	unsigned int max_freq = gd_policy->policy->cpuinfo.max_freq;
+
+	if (!t->psi_mem_cap_thresh)
+		return 0;
+
+	if (gardenia_psi_mem_pct() < t->psi_mem_cap_thresh)
+		return 0;
+
+	return mult_frac(max_freq, t->psi_mem_cap_pct, 100);
+}
+
+/*
+ * On the screen-off -> screen-on edge, stale hysteresis/decay state
+ * from before a (possibly long) suspend must not leak into the first
+ * post-resume ticks - the device may have fully cooled, the gaming
+ * exit-grace timer may be stamped from hours ago, and a stale
+ * ui_boost_end_ns could either wrongly hold a floor or wrongly miss
+ * arming one. Learned directly from Zenith's M7/M7b audit fix, which
+ * documents exactly this class of bug (stale pre-suspend state biasing
+ * the first post-resume decision window).
+ */
+static void gardenia_resume_reset(struct gardenia_policy *gd_policy)
+{
+	bool screen_on = gd_policy->tunables->screen_on;
+
+	if (!gd_policy->screen_on_last && screen_on) {
+		gd_policy->last_gaming_active_ns = 0;
+		gd_policy->ui_boost_end_ns = 0;
+		gd_policy->prev_upct = 0;
+		gd_policy->thermal_applied_pct = 0;
+		gd_policy->thermal_step_ns = 0;
+	}
+	gd_policy->screen_on_last = screen_on;
+}
+
 static void gardenia_refresh_profile(struct gardenia_policy *gd_policy)
 {
 	struct gardenia_tunables *t = gd_policy->tunables;
-	bool gaming = gardenia_gaming(gd_policy);
+	bool gaming;
+
+	gardenia_resume_reset(gd_policy);
+	gaming = gardenia_gaming(gd_policy);
 
 	if (gd_policy->last_gaming_state == gaming)
 		return;
@@ -537,7 +692,7 @@ static unsigned int gardenia_next_freq(struct gardenia_policy *gd_policy,
 			     policy->cpuinfo.max_freq : policy->cur;
 	unsigned long adj_max = gardenia_thermal_discount(gd_policy, cpu, max, time);
 	unsigned long next_util;
-	unsigned int floor_freq, screen_cap, target;
+	unsigned int floor_freq, screen_cap, mem_cap, target;
 	bool gaming = gardenia_gaming(gd_policy);
 	bool boosted = gardenia_touch_boosted();
 	bool ramp_active = gardenia_ui_ramp_active(gd_policy, util, max, time);
@@ -563,6 +718,14 @@ static unsigned int gardenia_next_freq(struct gardenia_policy *gd_policy,
 
 	if (!gaming)
 		target = gardenia_apply_daily_shape(gd_policy, target, ui_active);
+
+	floor_freq = gardenia_psi_floor(gd_policy, gaming);
+	if (floor_freq)
+		target = max(target, floor_freq);
+
+	mem_cap = gardenia_psi_mem_cap(gd_policy);
+	if (mem_cap)
+		target = min(target, mem_cap);
 
 	/* screen-off cap always wins - it's a hard ceiling, not a floor */
 	screen_cap = gardenia_screen_off_cap(gd_policy);
@@ -835,6 +998,10 @@ GARDENIA_ATTR_RW(little_cap_pct);
 GARDENIA_ATTR_RW(little_boost_cap_pct);
 GARDENIA_ATTR_RW(little_ui_floor_pct);
 GARDENIA_ATTR_RW(big_ui_floor_pct);
+GARDENIA_ATTR_RW(psi_cpu_floor_thresh);
+GARDENIA_ATTR_RW(psi_cpu_floor_pct);
+GARDENIA_ATTR_RW(psi_mem_cap_thresh);
+GARDENIA_ATTR_RW(psi_mem_cap_pct);
 GARDENIA_ATTR_RW_BOOL(thermal_aware);
 GARDENIA_ATTR_RW_BOOL(screen_on);
 
@@ -915,6 +1082,10 @@ static struct attribute *gardenia_attrs[] = {
 	&little_boost_cap_pct_attr.attr,
 	&little_ui_floor_pct_attr.attr,
 	&big_ui_floor_pct_attr.attr,
+	&psi_cpu_floor_thresh_attr.attr,
+	&psi_cpu_floor_pct_attr.attr,
+	&psi_mem_cap_thresh_attr.attr,
+	&psi_mem_cap_pct_attr.attr,
 	&thermal_aware_attr.attr,
 	&screen_on_attr.attr,
 	&gaming_mode_attr.attr,
@@ -963,6 +1134,10 @@ static struct gardenia_tunables *gardenia_tunables_alloc(struct cpufreq_policy *
 	t->little_boost_cap_pct	= GARDENIA_LITTLE_BOOST_CAP_PCT_DEFAULT;
 	t->little_ui_floor_pct		= GARDENIA_LITTLE_UI_FLOOR_PCT_DEFAULT;
 	t->big_ui_floor_pct		= GARDENIA_BIG_UI_FLOOR_PCT_DEFAULT;
+	t->psi_cpu_floor_thresh		= GARDENIA_PSI_CPU_FLOOR_THRESH_DEFAULT;
+	t->psi_cpu_floor_pct		= GARDENIA_PSI_CPU_FLOOR_PCT_DEFAULT;
+	t->psi_mem_cap_thresh		= GARDENIA_PSI_MEM_CAP_THRESH_DEFAULT;
+	t->psi_mem_cap_pct		= GARDENIA_PSI_MEM_CAP_PCT_DEFAULT;
 	t->thermal_aware		= true;
 	t->screen_on			= true;
 
@@ -1010,6 +1185,7 @@ static int gardenia_init(struct cpufreq_policy *policy)
 	gd_policy->is_little = cpumask_test_cpu(0, policy->related_cpus);
 	raw_spin_lock_init(&gd_policy->update_lock);
 	gd_policy->last_gaming_state = -1;
+	gd_policy->screen_on_last = true;
 	gd_policy->next_freq = policy->cur;
 	gardenia_refresh_profile(gd_policy);
 
