@@ -1,3 +1,35 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * CPUFreq governor "gardenia"
+ *
+ * Schedutil-derived governor tuned for battery efficiency and thermal
+ * headroom during normal use, with an automatic switch to a
+ * low-latency responsive profile when gaming mode is active
+ * (sched_gaming_active, the same global driven by the existing fair.c
+ * gaming-bias patch and readable/writable here too via gaming_mode).
+ *
+ * Profiles / behavior:
+ *  - Normal: long rate-limit windows, bounded utilization discount,
+ *    thermal-pressure-aware extra discount, capped upward frequency
+ *    steps. Little cluster gets a milder discount than big cluster,
+ *    since little-core starvation is what actually causes UI jank in
+ *    daily use, while big-core discount is where the battery win is.
+ *  - Touch boost: on any touchscreen event, discount is suspended for
+ *    a short window so the first frames after a tap/scroll aren't
+ *    throttled - independent of gaming mode, this is what keeps daily
+ *    scrolling feeling immediate instead of springy.
+ *  - Gaming: rate limits collapse toward stock-schedutil values, the
+ *    discount is dropped, and a hispeed floor guarantees a minimum
+ *    frequency once load crosses hispeed_load. An exit-hysteresis
+ *    window keeps the profile from flapping during loading screens.
+ *  - Screen off: an explicit screen_on tunable (fed by whatever
+ *    screen-state source you already have, e.g. the fsync driver's
+ *    polling) hard-caps frequency for background/doze battery saving.
+ *
+ * All numeric knobs are sysfs tunables under
+ * /sys/devices/system/cpu/cpufreq/policyX/gardenia/.
+ */
+
 #define pr_fmt(fmt) "gardenia: " fmt
 
 #include <linux/cpufreq.h>
@@ -25,11 +57,10 @@ extern int sched_gaming_active;
 
 #define GARDENIA_UP_RATE_LIMIT_NORMAL_US	(8000)
 #define GARDENIA_DOWN_RATE_LIMIT_NORMAL_US	(50000)
-#define GARDENIA_UP_RATE_LIMIT_GAME_US		(2000)
 #define GARDENIA_DOWN_RATE_LIMIT_GAME_US	(8000)
 
-#define GARDENIA_UTIL_BIAS_PCT_DEFAULT		(92)	/* big cluster, normal */
-#define GARDENIA_UTIL_BIAS_LITTLE_PCT_DEFAULT	(96)	/* little cluster, normal */
+#define GARDENIA_HEADROOM_GAMING_LITTLE_PCT_DEFAULT	(25)
+#define GARDENIA_HEADROOM_GAMING_BIG_PCT_DEFAULT	(15)
 #define GARDENIA_MAX_STEP_PCT_DEFAULT		(80)	/* normal profile */
 
 #define GARDENIA_HISPEED_LOAD_DEFAULT		(85)	/* pct, gaming only */
@@ -137,10 +168,10 @@ struct gardenia_tunables {
 
 	unsigned int up_rate_limit_normal_us;
 	unsigned int down_rate_limit_normal_us;
-	unsigned int up_rate_limit_game_us;
 	unsigned int down_rate_limit_game_us;
 
-	unsigned int util_bias_pct;
+	unsigned int headroom_gaming_little_pct;
+	unsigned int headroom_gaming_big_pct;
 	unsigned int max_step_pct;
 
 	unsigned int hispeed_load;
@@ -169,6 +200,10 @@ struct gardenia_policy {
 	unsigned int cached_raw_freq;
 	int last_gaming_state;
 	u64 last_gaming_active_ns;
+
+	/* thermal step controller state - see gardenia_thermal_discount() */
+	int thermal_applied_pct;
+	u64 thermal_step_ns;
 
 	struct irq_work irq_work;
 	struct kthread_work work;
@@ -233,8 +268,10 @@ static void gardenia_refresh_profile(struct gardenia_policy *gd_policy)
 		return;
 
 	if (gaming) {
-		gd_policy->up_rate_delay_ns =
-			(s64)t->up_rate_limit_game_us * NSEC_PER_USEC;
+		/* Instant up while gaming - never delay a frame that needs
+		 * more clock, only the downward step stays rate-limited.
+		 */
+		gd_policy->up_rate_delay_ns = 0;
 		gd_policy->down_rate_delay_ns =
 			(s64)t->down_rate_limit_game_us * NSEC_PER_USEC;
 	} else {
@@ -272,21 +309,52 @@ static bool gardenia_rate_limited(struct gardenia_policy *gd_policy,
 	return false;
 }
 
-/* ---- Thermal pressure discount ---------------------------------------- */
+/* ---- Thermal step controller -------------------------------------------- */
 
+#define GARDENIA_THERMAL_STEP_NS		(200000000ULL) /* 200ms tick */
+#define GARDENIA_THERMAL_STEP_DOWN_PCT		(4)  /* enter throttle fast */
+#define GARDENIA_THERMAL_STEP_UP_PCT		(2)  /* recover gently, no bounce */
+#define GARDENIA_THERMAL_MIN_CAP_PCT		(60)
+
+/*
+ * Walk the applied thermal cap toward the pressure-derived target in
+ * small, rate-limited steps rather than snapping to it every tick.
+ * Stepping down faster than up gives a smooth throttle entry and a
+ * gentle recovery with no oscillation right at the trip point -
+ * learned from Vorpal's rfx_thermal_clamp(). This directly targets
+ * the "still a bit choppy" feedback during longer gaming sessions,
+ * where an instant discount was jittering freq every 2s tick.
+ */
 static unsigned long gardenia_thermal_discount(struct gardenia_policy *gd_policy,
-						 int cpu, unsigned long max)
+						 int cpu, unsigned long max,
+						 u64 time)
 {
 	unsigned long pressure;
+	int target, applied;
 
 	if (!gd_policy->tunables->thermal_aware)
 		return max;
 
 	pressure = arch_scale_thermal_pressure(cpu);
-	if (!pressure)
+	target = 100 - (int)mult_frac(pressure, GARDENIA_THERMAL_DISCOUNT_MAX_PCT, 100);
+	target = clamp(target, GARDENIA_THERMAL_MIN_CAP_PCT, 100);
+
+	applied = gd_policy->thermal_applied_pct ? gd_policy->thermal_applied_pct : 100;
+
+	if ((s64)(time - gd_policy->thermal_step_ns) >= (s64)GARDENIA_THERMAL_STEP_NS) {
+		if (applied > target)
+			applied -= GARDENIA_THERMAL_STEP_DOWN_PCT;
+		else if (applied < target)
+			applied += GARDENIA_THERMAL_STEP_UP_PCT;
+		applied = clamp(applied, GARDENIA_THERMAL_MIN_CAP_PCT, 100);
+		gd_policy->thermal_applied_pct = applied;
+		gd_policy->thermal_step_ns = time;
+	}
+
+	if (applied >= 100)
 		return max;
 
-	return max - mult_frac(pressure, GARDENIA_THERMAL_DISCOUNT_MAX_PCT, 100);
+	return mult_frac(max, (unsigned int)applied, 100);
 }
 
 /* ---- Frequency selection ----------------------------------------------- */
@@ -334,26 +402,66 @@ static unsigned int gardenia_screen_off_cap(struct gardenia_policy *gd_policy)
 	return mult_frac(max_freq, t->screen_off_cap_pct, 100);
 }
 
+/*
+ * Headroom, not discount: request slightly MORE capacity than measured
+ * so the resolved OPP has slack, instead of shaving util down and
+ * landing exactly on the edge of what's needed (which is what the old
+ * util_bias_pct discount did - fine for battery, bad for smoothness on
+ * borderline loads). Daily uses a tiered curve - negligible headroom
+ * at low util (battery), more as util climbs (responsiveness). Gaming
+ * uses a flat generous headroom. Learned directly from Reflex/Vorpal's
+ * rfx_apply_headroom().
+ */
+static unsigned long gardenia_apply_headroom(struct gardenia_policy *gd_policy,
+					      unsigned long util,
+					      unsigned long max, bool gaming)
+{
+	struct gardenia_tunables *t = gd_policy->tunables;
+	unsigned int upct;
+
+	if (!max || util >= max)
+		return max;
+
+	upct = (unsigned int)(util * 100 / max);
+	if (upct >= 95)
+		return max;
+
+	if (gaming) {
+		unsigned int h = gd_policy->is_little ?
+			t->headroom_gaming_little_pct : t->headroom_gaming_big_pct;
+		return min(util + util * h / 100, max);
+	}
+
+	if (gd_policy->is_little) {
+		if (upct >= 70)
+			return min(util + (util >> 4), max);
+		if (upct >= 45)
+			return min(util + (util >> 5), max);
+		return util;
+	}
+
+	if (upct >= 75)
+		return min(util + (util >> 4), max);
+	if (upct >= 50)
+		return min(util + (util >> 5), max);
+	return min(util + (util >> 6), max);
+}
+
 static unsigned int gardenia_next_freq(struct gardenia_policy *gd_policy,
 					int cpu, unsigned long util,
-					unsigned long max)
+					unsigned long max, u64 time)
 {
 	struct cpufreq_policy *policy = gd_policy->policy;
-	struct gardenia_tunables *t = gd_policy->tunables;
 	unsigned int freq = arch_scale_freq_invariant() ?
 			     policy->cpuinfo.max_freq : policy->cur;
-	unsigned long adj_max = gardenia_thermal_discount(gd_policy, cpu, max);
-	unsigned long next_util = util;
+	unsigned long adj_max = gardenia_thermal_discount(gd_policy, cpu, max, time);
+	unsigned long next_util;
 	unsigned int floor_freq, screen_cap, target;
 	bool gaming = gardenia_gaming(gd_policy);
 	bool boosted = gardenia_touch_boosted();
 
-	if (!gaming && !boosted) {
-		unsigned int bias = gd_policy->is_little ?
-			max(t->util_bias_pct, GARDENIA_UTIL_BIAS_LITTLE_PCT_DEFAULT) :
-			t->util_bias_pct;
-		next_util = (util * bias) / 100;
-	}
+	next_util = boosted ? util :
+		    gardenia_apply_headroom(gd_policy, util, max, gaming);
 
 	freq = map_util_freq(next_util, freq, adj_max);
 
@@ -534,7 +642,7 @@ static void gardenia_update_single_cpu(struct gardenia_cpu *gd_cpu,
 	util = max(util, boost);
 	util = gardenia_ema_smooth(gd_cpu, util);
 
-	next_f = gardenia_next_freq(gd_policy, gd_cpu->cpu, util, max);
+	next_f = gardenia_next_freq(gd_policy, gd_cpu->cpu, util, max, time);
 
 	/* Don't let a brief idle blip drop freq below what's already
 	 * running - avoids the measure-low / correct-next-tick sawtooth
@@ -561,6 +669,14 @@ static void gardenia_update_util(struct update_util_data *hook, u64 time,
 {
 	struct gardenia_cpu *gd_cpu = container_of(hook, struct gardenia_cpu,
 						    update_util);
+
+	/* Only the CPU actually entitled to drive this policy (matters on
+	 * shared little-cluster policies with several CPUs) may act on it -
+	 * matches schedutil/Reflex's sugov_this_cpu_can_update() gate. Skips
+	 * spurious/racy updates from a CPU mid-hotplug or isolated.
+	 */
+	if (!cpufreq_this_cpu_can_update(gd_cpu->gd_policy->policy))
+		return;
 
 	raw_spin_lock(&gd_cpu->gd_policy->update_lock);
 	gardenia_update_single_cpu(gd_cpu, time, flags);
@@ -617,9 +733,9 @@ static struct kobj_attribute _name##_attr =					\
 
 GARDENIA_ATTR_RW(up_rate_limit_normal_us);
 GARDENIA_ATTR_RW(down_rate_limit_normal_us);
-GARDENIA_ATTR_RW(up_rate_limit_game_us);
 GARDENIA_ATTR_RW(down_rate_limit_game_us);
-GARDENIA_ATTR_RW(util_bias_pct);
+GARDENIA_ATTR_RW(headroom_gaming_little_pct);
+GARDENIA_ATTR_RW(headroom_gaming_big_pct);
 GARDENIA_ATTR_RW(max_step_pct);
 GARDENIA_ATTR_RW(hispeed_load);
 GARDENIA_ATTR_RW(hispeed_freq_pct);
@@ -690,9 +806,9 @@ static struct kobj_attribute gaming_mode_attr =
 static struct attribute *gardenia_attrs[] = {
 	&up_rate_limit_normal_us_attr.attr,
 	&down_rate_limit_normal_us_attr.attr,
-	&up_rate_limit_game_us_attr.attr,
 	&down_rate_limit_game_us_attr.attr,
-	&util_bias_pct_attr.attr,
+	&headroom_gaming_little_pct_attr.attr,
+	&headroom_gaming_big_pct_attr.attr,
 	&max_step_pct_attr.attr,
 	&hispeed_load_attr.attr,
 	&hispeed_freq_pct_attr.attr,
@@ -732,9 +848,9 @@ static struct gardenia_tunables *gardenia_tunables_alloc(struct cpufreq_policy *
 
 	t->up_rate_limit_normal_us	= GARDENIA_UP_RATE_LIMIT_NORMAL_US;
 	t->down_rate_limit_normal_us	= GARDENIA_DOWN_RATE_LIMIT_NORMAL_US;
-	t->up_rate_limit_game_us	= GARDENIA_UP_RATE_LIMIT_GAME_US;
 	t->down_rate_limit_game_us	= GARDENIA_DOWN_RATE_LIMIT_GAME_US;
-	t->util_bias_pct		= GARDENIA_UTIL_BIAS_PCT_DEFAULT;
+	t->headroom_gaming_little_pct	= GARDENIA_HEADROOM_GAMING_LITTLE_PCT_DEFAULT;
+	t->headroom_gaming_big_pct	= GARDENIA_HEADROOM_GAMING_BIG_PCT_DEFAULT;
 	t->max_step_pct			= GARDENIA_MAX_STEP_PCT_DEFAULT;
 	t->hispeed_load			= GARDENIA_HISPEED_LOAD_DEFAULT;
 	t->hispeed_freq_pct		= GARDENIA_HISPEED_FREQ_PCT_DEFAULT;
