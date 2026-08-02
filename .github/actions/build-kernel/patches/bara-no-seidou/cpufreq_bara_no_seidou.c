@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (C) 2026 kusonekoworld-max
+ * Copyright (C) 2026 kusonekoworld
  *
  * CPUFreq governor "bara-no-seidou"
  *
@@ -57,6 +57,118 @@
 #include "sched.h"
 
 extern int sched_gaming_active;
+
+#include <linux/devfreq.h>
+
+/* ---- GPU devfreq lock (game-mode max-clock) ---------------------------- */
+
+static char gpu_devfreq_name[DEVFREQ_NAME_LEN] = "";
+module_param_string(gpu_devfreq_name, gpu_devfreq_name,
+                    sizeof(gpu_devfreq_name), 0644);
+MODULE_PARM_DESC(gpu_devfreq_name,
+                 "Nama devfreq GPU persis (kosong = auto-probe candidate list)");
+
+/* Nama devfreq device GPU yang umum dipakai di GKI target. Devfreq
+ * name matching itu exact-string, bukan substring, jadi platform yang
+ * nge-prefix base address devicetree (kayak Bengal/SD685) butuh entry
+ * sendiri. Tambah entry baru di sini kalau pindah ke SoC lain.
+ */
+static const char * const gpu_devfreq_candidates[] = {
+	"5900000.qcom,kgsl-3d0",	/* Adreno 610, SD685/Bengal */
+	"kgsl-3d0",			/* Adreno, nama polos (SoC lain) */
+	"gpu",
+	"mali",
+	NULL
+};
+
+static struct devfreq *bara_no_seidou_gpu_devfreq_cached;
+
+/*
+ * Resolve devfreq device GPU sekali (cached) - device devfreq GPU gak
+ * bakal muncul/hilang saat runtime, jadi cukup di-probe sekali lalu
+ * dipakai ulang tiap kali dibutuhkan.
+ */
+static struct devfreq *bara_no_seidou_find_gpu_devfreq(void)
+{
+	struct devfreq *df;
+	int i;
+
+	if (bara_no_seidou_gpu_devfreq_cached)
+		return bara_no_seidou_gpu_devfreq_cached;
+
+	if (gpu_devfreq_name[0]) {
+		df = devfreq_get_devfreq_by_name(gpu_devfreq_name);
+		if (!IS_ERR_OR_NULL(df))
+			goto found;
+		pr_warn("gpu_devfreq_name='%s' tidak ditemukan, fallback auto-probe\n",
+			gpu_devfreq_name);
+	}
+
+	for (i = 0; gpu_devfreq_candidates[i]; i++) {
+		df = devfreq_get_devfreq_by_name(gpu_devfreq_candidates[i]);
+		if (!IS_ERR_OR_NULL(df))
+			goto found;
+	}
+
+	pr_warn("tidak ada devfreq GPU yang cocok, GPU lock nonaktif\n");
+	return NULL;
+
+found:
+	bara_no_seidou_gpu_devfreq_cached = df;
+	pr_info("GPU devfreq resolved: %s\n", dev_name(&df->dev));
+	return df;
+}
+
+/*
+ * Lock GPU devfreq ke scaling_max_freq selama gaming mode aktif; lepas
+ * clamp begitu gaming berakhir. Dipanggil hanya sekali per edge
+ * transisi dari bara_no_seidou_refresh_profile() (yang sudah filter
+ * itu), bukan tiap tick.
+ *
+ * bara_no_seidou_gpu_lock() sendiri aman dipanggil dari context
+ * manapun - atomic/fast-switch tick maupun kthread - karena cuma
+ * nge-set state lalu schedule_work(); mutex_lock()/update_devfreq()
+ * yang butuh sleep dieksekusi belakangan di workqueue context yang
+ * boleh sleep. Ini menghindari perlu deteksi fast_switch_enabled
+ * sama sekali - satu code path buat kedua kondisi.
+ */
+static atomic_t bara_no_seidou_gpu_lock_pending = ATOMIC_INIT(-1); /* -1=none, 0=off, 1=on */
+
+static void bara_no_seidou_gpu_lock_apply(bool gaming)
+{
+	struct devfreq *gdf = bara_no_seidou_find_gpu_devfreq();
+
+	if (!gdf)
+		return;
+
+	mutex_lock(&gdf->lock);
+	if (gaming) {
+		gdf->min_freq = gdf->scaling_max_freq;
+		gdf->max_freq = gdf->scaling_max_freq;
+	} else {
+		gdf->min_freq = 0;
+		gdf->max_freq = 0;	/* lepas cap, balik ke range penuh */
+	}
+	update_devfreq(gdf);
+	mutex_unlock(&gdf->lock);
+}
+
+static void bara_no_seidou_gpu_lock_work_fn(struct work_struct *work)
+{
+	int state = atomic_xchg(&bara_no_seidou_gpu_lock_pending, -1);
+
+	if (state < 0)
+		return;
+	bara_no_seidou_gpu_lock_apply(state);
+}
+
+static DECLARE_WORK(bara_no_seidou_gpu_lock_work, bara_no_seidou_gpu_lock_work_fn);
+
+static void bara_no_seidou_gpu_lock(bool gaming)
+{
+	atomic_set(&bara_no_seidou_gpu_lock_pending, gaming ? 1 : 0);
+	schedule_work(&bara_no_seidou_gpu_lock_work);
+}
 
 /* ---- Defaults (overridable at runtime via sysfs) --------------------- */
 
@@ -444,11 +556,13 @@ static void bara_no_seidou_refresh_profile(struct bara_no_seidou_policy *gd_poli
 		gd_policy->up_rate_delay_ns = 0;
 		gd_policy->down_rate_delay_ns =
 			(s64)t->down_rate_limit_game_us * NSEC_PER_USEC;
+		bara_no_seidou_gpu_lock(true);
 	} else {
 		gd_policy->up_rate_delay_ns =
 			(s64)t->up_rate_limit_normal_us * NSEC_PER_USEC;
 		gd_policy->down_rate_delay_ns =
 			(s64)t->down_rate_limit_normal_us * NSEC_PER_USEC;
+		bara_no_seidou_gpu_lock(false);
 	}
 
 	gd_policy->last_gaming_state = gaming;
