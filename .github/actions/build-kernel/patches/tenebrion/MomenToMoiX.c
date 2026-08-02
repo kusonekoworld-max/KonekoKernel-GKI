@@ -19,6 +19,7 @@
 
 MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
 
+
 static int poll_interval_ms = 1000;
 module_param(poll_interval_ms, int, 0644);
 
@@ -40,7 +41,7 @@ module_param(charging_freq_bias_percent, int, 0644);
 static int doze_active_freq_bias_percent = 10;
 module_param(doze_active_freq_bias_percent, int, 0644);
 
-/* --- NEW: Wake Boost feature params --- */
+/* --- Wake Boost feature params --- */
 static int wake_boost_percent = 100;
 module_param(wake_boost_percent, int, 0644);
 MODULE_PARM_DESC(wake_boost_percent, "Freq floor (%) briefly applied right after screen-on for snappier wake. 0 disables.");
@@ -48,6 +49,14 @@ MODULE_PARM_DESC(wake_boost_percent, "Freq floor (%) briefly applied right after
 static int wake_boost_ms = 1200;
 module_param(wake_boost_ms, int, 0644);
 MODULE_PARM_DESC(wake_boost_ms, "Duration (ms) the wake boost floor is held before reverting to normal scaling.");
+
+/* --- NEW: Bara-no-Seidou screen-state sync --- */
+static bool sync_bara_no_seidou_screen_state = true;
+module_param(sync_bara_no_seidou_screen_state, bool, 0644);
+MODULE_PARM_DESC(sync_bara_no_seidou_screen_state,
+		 "Mirror screen on/off into every cpufreq policy's bara-no-seidou/screen_on sysfs node. "
+		 "Silently skipped per-policy if that governor isn't the one active there.");
+
 
 #define THERMAL_ZONE_MAX    15
 
@@ -96,10 +105,11 @@ static DEFINE_MUTEX(momx_lock);
 
 static bool is_screen_off = false;
 static bool in_deep_sleep = false;
-static bool force_resync = false;   /* NEW: forces a state resync after suspend/resume */
+static bool force_resync = false;   /* forces a state resync after suspend/resume */
 static bool thermal_hold_active = false;
 static unsigned long thermal_hold_expire = 0;
 static int last_temp_mc = -273000;
+static bool last_charging_state = false;
 static char power_status_path[64] = "";
 static bool power_status_available = false;
 
@@ -112,7 +122,8 @@ static char iosched_path[64] = "";
 static char default_iosched[32] = "none";
 static bool iosched_available = false;
 
-/* NEW: Wake Boost workqueue plumbing */
+
+/* Wake Boost workqueue plumbing */
 static struct workqueue_struct *momx_wq;
 static struct delayed_work wake_boost_work;
 static bool wake_boost_active = false;
@@ -284,7 +295,7 @@ static void momx_qos_init(void) {
     pr_info("Initialized Freq QoS requests for %d CPUs\n", count);
 }
 
-/* FIX #2: hotplug-aware QoS lifecycle.
+/* Hotplug-aware QoS lifecycle.
  * Previously momx_qos_init() only ran once at boot, so any cpufreq policy
  * created later (e.g. a cluster brought back online after being hotplugged
  * off) never got a QoS request registered, silently excluding it from all
@@ -353,7 +364,43 @@ static void momx_restore_freq(void) {
     pr_info("Restored stock CPU frequencies (QoS restrictions cleared)\n");
 }
 
-/* --- NEW FEATURE: Wake Boost ---
+/* --- NEW: Bara-no-Seidou screen-state sync ---
+ * Bara-no-Seidou's cpufreq governor exposes a per-policy `screen_on`
+ * sysfs node (screen_off_cap_pct + the resume-state-reset both key off
+ * it) but has no way to observe display state itself - that's exactly
+ * what this driver already tracks. Rather than requiring a manual echo
+ * every time the screen changes, mirror the same on/off transition this
+ * driver already detects into every cpufreq policy's governor node.
+ *
+ * This is deliberately a plain sysfs write, not a symbol dependency: if
+ * a policy's active governor isn't bara-no-seidou (or the node doesn't
+ * exist on some future/older build), momx_write_file() just fails
+ * silently via its existing IS_ERR(filp_open(...)) check - no crash, no
+ * special-casing needed here, and no build-time coupling between the
+ * two drivers.
+ */
+static void momx_sync_bara_no_seidou_screen(bool screen_is_on) {
+    unsigned int cpu;
+    struct cpufreq_policy *policy;
+    char path[96];
+
+    if (!sync_bara_no_seidou_screen_state)
+        return;
+
+    for_each_online_cpu(cpu) {
+        policy = cpufreq_cpu_get(cpu);
+        if (!policy) continue;
+        if (policy->cpu == cpu) {
+            snprintf(path, sizeof(path),
+                     "/sys/devices/system/cpu/cpufreq/policy%u/bara-no-seidou/screen_on",
+                     cpu);
+            momx_write_file(path, screen_is_on ? "1" : "0");
+        }
+        cpufreq_cpu_put(policy);
+    }
+}
+
+/* --- Wake Boost ---
  * When the screen turns on, briefly hold a high frequency floor so the
  * unlock animation / first app launch feels snappy, then let the stock
  * governor take back over. Runs on a workqueue so it never blocks the
@@ -398,6 +445,7 @@ static void momx_on_screen_off(void) {
     temp = momx_read_max_temp();
 
     last_temp_mc = temp;
+    last_charging_state = charging;
     is_screen_off = true;
 
     pr_info("Display Mode: OFF | Charging: %s | Max Temp: %d mC\n", charging ? "Yes" : "No", temp);
@@ -405,6 +453,7 @@ static void momx_on_screen_off(void) {
     momx_apply_freq_bias(bias);
     momx_cpuset_restrict();
     momx_iosched_restrict();
+    momx_sync_bara_no_seidou_screen(false);
 
     if (temp >= thermal_threshold_mc) {
         thermal_hold_active = true;
@@ -420,10 +469,11 @@ static void momx_on_screen_on(void) {
 
     momx_cpuset_restore();
     momx_iosched_restore();
+    momx_sync_bara_no_seidou_screen(true);
 
     if (thermal_hold_active) {
-        /* FIX #4: previously we always re-armed a fresh thermal_hold_expire
-         * timer here, even if the device had already cooled down while the
+        /* Previously we always re-armed a fresh thermal_hold_expire timer
+         * here, even if the device had already cooled down while the
          * screen was off. That let a stale hold flag "stick" for up to
          * thermal_hold_ms longer than necessary on every subsequent wake.
          * Now we re-check the current temperature immediately and release
@@ -461,6 +511,36 @@ static void momx_thermal_hold_tick(void) {
     }
 }
 
+/* --- NEW: re-check charging state while the screen is off ---
+ * momx_on_screen_off() only sampled charging status once, at the exact
+ * moment the screen turned off, then locked that bias in until the next
+ * screen transition. Plugging in (or unplugging) mid-doze - the single
+ * most common real-world case, e.g. charging overnight - never got
+ * picked up until the screen cycled again. This mirrors the existing
+ * thermal_hold_tick pattern: cheap poll-cycle re-check, only acts on an
+ * actual state change, skipped entirely if a thermal hold already owns
+ * the frequency bias right now (thermal always wins over charge-based
+ * bias while both are screen-off-only restrictions).
+ */
+static void momx_charge_state_tick(void) {
+    bool charging;
+    int bias;
+
+    if (!is_screen_off || thermal_hold_active)
+        return;
+
+    charging = momx_is_charging();
+    if (charging == last_charging_state)
+        return;
+
+    bias = charging ? charging_freq_bias_percent : doze_active_freq_bias_percent;
+    pr_info("Charging state changed mid-doze (%s -> %s). Re-applying freq bias: %d%%\n",
+             last_charging_state ? "charging" : "not charging",
+             charging ? "charging" : "not charging", bias);
+    momx_apply_freq_bias(bias);
+    last_charging_state = charging;
+}
+
 static int momx_pm_notifier(struct notifier_block *nb, unsigned long action, void *data) {
     if (action == PM_SUSPEND_PREPARE) {
         in_deep_sleep = true;
@@ -490,13 +570,10 @@ static int momx_watcher(void *data) {
         int current_state = -1;
         char buf[64];
 
-        /* FIX #1: in_deep_sleep was set by the PM notifier but never
-         * actually consulted anywhere, so it was dead code — the watcher
-         * kept polling and touching cpuset/iosched/cpufreq sysfs nodes
-         * even while the system was mid-suspend/resume, which is both
-         * pointless and a potential race with the suspend path. Now we
-         * park the loop during that window and force a clean resync
-         * right after resume. */
+        /* in_deep_sleep is set by the PM notifier. The watcher parks
+         * itself during that window instead of touching cpuset/iosched/
+         * cpufreq sysfs nodes mid-suspend, then forces a clean resync
+         * right after resume (force_resync below). */
         if (in_deep_sleep) {
             msleep_interruptible(poll_interval_ms);
             continue;
@@ -527,6 +604,7 @@ static int momx_watcher(void *data) {
 
         mutex_lock(&momx_lock);
         momx_thermal_hold_tick();
+        momx_charge_state_tick();
         mutex_unlock(&momx_lock);
 
         msleep_interruptible(poll_interval_ms);
