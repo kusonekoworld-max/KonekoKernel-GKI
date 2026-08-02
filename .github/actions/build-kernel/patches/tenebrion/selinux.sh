@@ -56,6 +56,7 @@ sed -i "/${MARKER//\//\\/}/i\\
     ksu_allow(db, \"kernel\", \"sysfs\", \"dir\", \"search\");\\
     ksu_allow(db, \"kernel\", \"sysfs\", \"dir\", \"getattr\");\\
     ksu_allow(db, \"kernel\", \"sysfs\", \"file\", \"read\");\\
+    ksu_allow(db, \"kernel\", \"sysfs\", \"file\", \"write\");\\
     ksu_allow(db, \"kernel\", \"sysfs\", \"file\", \"open\");\\
     ksu_allow(db, \"kernel\", \"sysfs\", \"file\", \"getattr\");\\
     ksu_allow(db, \"kernel\", \"cgroup\", \"dir\", \"search\");\\
