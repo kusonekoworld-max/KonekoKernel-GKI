@@ -132,23 +132,28 @@ runs:
       run: |
         set -euo pipefail
         TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
-        NOMOUNT_DIR="${{ github.action_path }}/patches/nomount"
+        WORK_DIR="$(mktemp -d)"
+
+        git clone --depth=1 https://github.com/maxsteeel/nomount.git "$WORK_DIR/nomount"
 
         KVER="$(echo "${{ inputs.version }}" | sed -E 's/^android[0-9]+-//')"
 
-        PATCH_FILE="$NOMOUNT_DIR/nomount_${KVER}_kernel_integration.patch"
-        if [ ! -f "$PATCH_FILE" ]; then
-          echo "ERROR: no NoMount patch found for kernel version $KVER (derived from ${{ inputs.version }}) at $PATCH_FILE" >&2
-          echo "Available patches in $NOMOUNT_DIR:" >&2
-          ls -1 "$NOMOUNT_DIR"/*.patch 2>/dev/null || echo "  (none found)" >&2
+        PATCH_FILE="$(find "$WORK_DIR/nomount/kernel" -maxdepth 1 -type f -name "*${KVER}*kernel_integration.patch" | head -1)"
+
+        if [ -z "$PATCH_FILE" ]; then
+          echo "ERROR: no NoMount patch found for kernel version $KVER in upstream repo" >&2
+          echo "Available patches upstream:" >&2
+          find "$WORK_DIR/nomount/kernel" -maxdepth 1 -type f -name "*.patch" >&2 || echo "  (none found)" >&2
           exit 1
         fi
+
+        echo "Using patch: $(basename "$PATCH_FILE")"
 
         cd "$TARGET_DIR"
         patch -p1 < "$PATCH_FILE"
 
         mkdir -p "$TARGET_DIR/fs"
-        cp "$NOMOUNT_DIR/src/"* "$TARGET_DIR/fs/"
+        cp "$WORK_DIR/nomount/kernel/src/"* "$TARGET_DIR/fs/"
 
         DEFCONFIG_GKI="$TARGET_DIR/arch/arm64/configs/gki_defconfig"
         if [ -f "$DEFCONFIG_GKI" ] && ! grep -q "CONFIG_NOMOUNT" "$DEFCONFIG_GKI"; then
@@ -159,6 +164,8 @@ runs:
           echo "ERROR: failed to enable CONFIG_NOMOUNT in defconfig" >&2
           exit 1
         fi
+
+        rm -rf "$WORK_DIR"
 
     - name: 'Inject MomenToMoiX Driver'
       shell: bash
