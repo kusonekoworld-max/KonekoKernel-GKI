@@ -126,6 +126,35 @@ runs:
           echo "ERROR: failed to inject CPU_FREQ_GOV_BARA_NO_SEIDOU Kconfig entry" >&2
           exit 1
         fi
+    
+    - name: 'Inject NoMount'
+      shell: bash
+      run: |
+        set -euo pipefail
+        TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
+        NOMOUNT_DIR="${{ github.action_path }}/patches/nomount"
+
+        PATCH_FILE="$NOMOUNT_DIR/nomount_${{ inputs.version }}_kernel_integration.patch"
+        if [ ! -f "$PATCH_FILE" ]; then
+          echo "ERROR: no NoMount patch found for version ${{ inputs.version }} at $PATCH_FILE" >&2
+          exit 1
+        fi
+
+        cd "$TARGET_DIR"
+        patch -p1 < "$PATCH_FILE"
+
+        mkdir -p "$TARGET_DIR/fs"
+        cp "$NOMOUNT_DIR/src/"* "$TARGET_DIR/fs/"
+
+        DEFCONFIG_GKI="$TARGET_DIR/arch/arm64/configs/gki_defconfig"
+        if [ -f "$DEFCONFIG_GKI" ] && ! grep -q "CONFIG_NOMOUNT" "$DEFCONFIG_GKI"; then
+          echo "CONFIG_NOMOUNT=y" >> "$DEFCONFIG_GKI"
+        fi
+
+        if ! grep -q "CONFIG_NOMOUNT" "$DEFCONFIG_GKI"; then
+          echo "ERROR: failed to enable CONFIG_NOMOUNT in defconfig" >&2
+          exit 1
+        fi
 
     - name: 'Inject MomenToMoiX Driver'
       shell: bash
