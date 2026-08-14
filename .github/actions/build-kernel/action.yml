@@ -126,7 +126,7 @@ runs:
           echo "ERROR: failed to inject CPU_FREQ_GOV_BARA_NO_SEIDOU Kconfig entry" >&2
           exit 1
         fi
-    
+
     - name: 'Inject NoMount'
       shell: bash
       run: |
@@ -134,9 +134,13 @@ runs:
         TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
         NOMOUNT_DIR="${{ github.action_path }}/patches/nomount"
 
-        PATCH_FILE="$NOMOUNT_DIR/nomount_${{ inputs.version }}_kernel_integration.patch"
+        KVER="$(echo "${{ inputs.version }}" | sed -E 's/^android[0-9]+-//')"
+
+        PATCH_FILE="$NOMOUNT_DIR/nomount_${KVER}_kernel_integration.patch"
         if [ ! -f "$PATCH_FILE" ]; then
-          echo "ERROR: no NoMount patch found for version ${{ inputs.version }} at $PATCH_FILE" >&2
+          echo "ERROR: no NoMount patch found for kernel version $KVER (derived from ${{ inputs.version }}) at $PATCH_FILE" >&2
+          echo "Available patches in $NOMOUNT_DIR:" >&2
+          ls -1 "$NOMOUNT_DIR"/*.patch 2>/dev/null || echo "  (none found)" >&2
           exit 1
         fi
 
