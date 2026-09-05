@@ -127,46 +127,6 @@ runs:
           exit 1
         fi
 
-    - name: 'Inject NoMount'
-      shell: bash
-      run: |
-        set -euo pipefail
-        TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
-        WORK_DIR="$(mktemp -d)"
-
-        git clone --depth=1 https://github.com/maxsteeel/nomount.git "$WORK_DIR/nomount"
-
-        KVER="$(echo "${{ inputs.version }}" | sed -E 's/^android[0-9]+-//')"
-
-        PATCH_FILE="$(find "$WORK_DIR/nomount/kernel" -maxdepth 1 -type f -name "*${KVER}*kernel_integration.patch" | head -1)"
-
-        if [ -z "$PATCH_FILE" ]; then
-          echo "ERROR: no NoMount patch found for kernel version $KVER in upstream repo" >&2
-          echo "Available patches upstream:" >&2
-          find "$WORK_DIR/nomount/kernel" -maxdepth 1 -type f -name "*.patch" >&2 || echo "  (none found)" >&2
-          exit 1
-        fi
-
-        echo "Using patch: $(basename "$PATCH_FILE")"
-
-        cd "$TARGET_DIR"
-        patch -p1 < "$PATCH_FILE"
-
-        mkdir -p "$TARGET_DIR/fs"
-        cp "$WORK_DIR/nomount/kernel/src/"* "$TARGET_DIR/fs/"
-
-        DEFCONFIG_GKI="$TARGET_DIR/arch/arm64/configs/gki_defconfig"
-        if [ -f "$DEFCONFIG_GKI" ] && ! grep -q "CONFIG_NOMOUNT" "$DEFCONFIG_GKI"; then
-          echo "CONFIG_NOMOUNT=y" >> "$DEFCONFIG_GKI"
-        fi
-
-        if ! grep -q "CONFIG_NOMOUNT" "$DEFCONFIG_GKI"; then
-          echo "ERROR: failed to enable CONFIG_NOMOUNT in defconfig" >&2
-          exit 1
-        fi
-
-        rm -rf "$WORK_DIR"
-
     - name: 'Inject MomenToMoiX Driver'
       shell: bash
       run: |
@@ -328,80 +288,105 @@ runs:
           fi
         done
 
-    - name: 'Build Kernel'
+    - name: 'Inject Axion Vendor Hooks - Binder'
       shell: bash
-      working-directory: ${{ github.workspace }}/kernel
-      run: |
-        sed -i 's/check_defconfig//' ./common/build.config.gki
-        if [ -f "build/build.sh" ]; then
-          BUILD_GKI_ARTIFACTS= \
-          BUILD_GKI_CERTIFICATION_TOOLS=0 \
-          BUILD_SYSTEM_DLKM=0 \
-          SKIP_VENDOR_BOOT=1 \
-          SKIP_EXT_MODULES=1 \
-          SKIP_CP_KERNEL_HDR=1 \
-          OUT_DIR="/home/runner/out" \
-          LTO=thin \
-          BUILD_CONFIG=common/build.config.gki.aarch64 \
-          build/build.sh -j"$(nproc)" \
-          CC="/usr/bin/ccache clang" \
-          CXX="/usr/bin/ccache clang+" \
-          HOSTCC="/usr/bin/ccache clang" \
-          HOSTCXX="/usr/bin/ccache clang+" \
-          LD="${{ github.workspace }}/kernel/common/ld-wrapper" \
-          HOSTLD="${{ github.workspace }}/kernel/common/ld-wrapper"
-        else
-          if [[ ${{ inputs.version }} == "android16-6.12" ]]; then
-            if [ "${{ inputs.bypass }}" = "false" ]; then
-              sed -i '/name = "kernel_aarch64",/a\    check_defconfig = "disabled",' common/BUILD.bazel
-            fi
-            
-            export KMI_SYMBOL_LIST_STRICT_MODE=0
-
-            tools/bazel run \
-              --config=fast \
-              --config=stamp \
-              --disk_cache=/home/runner/.cache/bazel \
-              //common:kernel_aarch64_dist \
-              -- --destdir=/home/runner/out
-          else
-            tools/bazel run \
-              --config=fast \
-              --config=stamp \
-              --disk_cache=/home/runner/.cache/bazel \
-              //common:kernel_aarch64_dist \
-              -- --dist_dir=/home/runner/out
-          fi
-        fi
-
-    - name: 'Gather Build Artifacts'
-      shell: bash
-      working-directory: ${{ github.workspace }}
+      working-directory: ${{ github.workspace }}/kernel/common
       run: |
         set -euo pipefail
-        if [ -f "/home/runner/out/dist/Image" ]; then
-          if [[ ${{ inputs.bypass }} == "true" ]]; then
-            cp "/home/runner/out/dist/Image" "${{ github.workspace }}/AnyKernel3/Bypass-Image"
-          else
-            cp "/home/runner/out/dist/Image" "${{ github.workspace }}/AnyKernel3/Image"
-          fi
-          exit 0
-        fi
-        if [ -f "/home/runner/out/Image" ]; then
-          if [[ ${{ inputs.bypass }} == "true" ]]; then
-            cp "/home/runner/out/Image" "${{ github.workspace }}/AnyKernel3/Bypass-Image"
-          else
-            cp "/home/runner/out/Image" "${{ github.workspace }}/AnyKernel3/Image"
-          fi
-          exit 0
-        fi
-        echo "ERROR: No kernel Image artifact found in expected output paths." >&2
-        exit 1
+        BINDER_H="include/trace/hooks/binder.h"
+        VENDOR_HOOKS_C="drivers/android/vendor_hooks.c"
+        BINDER_C="drivers/android/binder.c"
 
-    - name: 'Patch AnyKernel3 for Bypass Hack'
+        if ! grep -q "android_vh_binder_special_task" "$BINDER_H"; then
+          perl -0pi -e 's{(/\* macro versions of hooks are no longer required \*/)}{
+DECLARE_HOOK(android_vh_binder_special_task,
+\tTP_PROTO(struct binder_transaction *t, struct binder_proc *proc,
+\t\tstruct binder_thread *thread, struct binder_work *w,
+\t\tstruct list_head *head, bool sync, bool *special_task),
+\tTP_ARGS(t, proc, thread, w, head, sync, special_task));
+DECLARE_HOOK(android_vh_binder_proc_transaction_finish,
+\tTP_PROTO(struct binder_proc *proc, struct binder_transaction *t,
+\t\tstruct task_struct *binder_th_task, bool pending_async, bool sync),
+\tTP_ARGS(proc, t, binder_th_task, pending_async, sync));
+DECLARE_HOOK(android_vh_binder_proc_transaction_entry,
+\tTP_PROTO(struct binder_proc *proc, struct binder_transaction *t,
+\tstruct binder_thread **thread, int node_debug_id, bool pending_async,
+\tbool sync, bool *skip),
+\tTP_ARGS(proc, t, thread, node_debug_id, pending_async, sync, skip));
+DECLARE_HOOK(android_vh_binder_select_worklist_ilocked,
+\tTP_PROTO(struct list_head **list, struct binder_thread *thread, struct binder_proc *proc,
+\tint wait_for_proc_work),
+\tTP_ARGS(list, thread, proc, wait_for_proc_work));
+DECLARE_HOOK(android_vh_binder_has_work_ilocked,
+\tTP_PROTO(struct binder_thread *thread, bool do_proc_work, int *ret),
+\tTP_ARGS(thread, do_proc_work, ret));
+DECLARE_HOOK(android_vh_binder_read_done,
+\tTP_PROTO(struct binder_proc *proc, struct binder_thread *thread),
+\tTP_ARGS(proc, thread));
+DECLARE_HOOK(android_vh_binder_looper_state_registered,
+\tTP_PROTO(struct binder_thread *thread, struct binder_proc *proc),
+\tTP_ARGS(thread, proc));
+DECLARE_HOOK(android_vh_binder_thread_release,
+\tTP_PROTO(struct binder_proc *proc, struct binder_thread *thread),
+\tTP_ARGS(proc, thread));
+DECLARE_HOOK(android_vh_binder_free_proc,
+\tTP_PROTO(struct binder_proc *proc),
+\tTP_ARGS(proc));
+
+$1}' "$BINDER_H"
+        fi
+
+        if ! grep -q "EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_binder_special_task)" "$VENDOR_HOOKS_C"; then
+          perl -0pi -e 's{(EXPORT_TRACEPOINT_SYMBOL_GPL\(android_vh_binder_wait_for_work\);)}{$1
+EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_binder_special_task);
+EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_binder_proc_transaction_finish);
+EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_binder_proc_transaction_entry);
+EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_binder_select_worklist_ilocked);
+EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_binder_has_work_ilocked);
+EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_binder_read_done);
+EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_binder_looper_state_registered);
+EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_binder_thread_release);
+EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_binder_free_proc);}' "$VENDOR_HOOKS_C"
+        fi
+
+        if ! grep -q "trace_android_vh_binder_has_work_ilocked" "$BINDER_C"; then
+          perl -0pi -e 's{(static bool binder_has_work_ilocked\(struct binder_thread \*thread,\n\t\t\t\t    bool do_proc_work\)\n\{\n)}{$1\tint ret = 0;\n\n\ttrace_android_vh_binder_has_work_ilocked(thread, do_proc_work, &ret);\n\tif (ret)\n\t\treturn true;\n}' "$BINDER_C"
+        fi
+
+        for MARK in "android_vh_binder_special_task" "android_vh_binder_free_proc"; do
+          if ! grep -qF "$MARK" "$BINDER_H"; then
+            echo "ERROR: failed to inject $MARK into binder.h" >&2
+            exit 1
+          fi
+        done
+        if ! grep -q "EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_binder_special_task)" "$VENDOR_HOOKS_C"; then
+          echo "ERROR: failed to export android_vh_binder_special_task in vendor_hooks.c" >&2
+          exit 1
+        fi
+        if ! grep -q "trace_android_vh_binder_has_work_ilocked" "$BINDER_C"; then
+          echo "ERROR: failed to patch binder_has_work_ilocked in binder.c" >&2
+          exit 1
+        fi
+
+        echo "NOTE: binder_proc_transaction, binder_thread_read, binder_thread_release,"
+        echo "      binder_free_proc, and BC_ENTER_LOOPER call-site injections are NOT"
+        echo "      included yet -- they require exact context matching against this"
+        echo "      kernel's binder.c body, which has only been spot-checked so far."
+
+    - name: 'Inject Axion Vendor Hooks - fs.h iolimit_rw'
       shell: bash
-      if: ${{ inputs.bypass == 'true' }}
-      working-directory: ${{ github.workspace }}/AnyKernel3
+      working-directory: ${{ github.workspace }}/kernel/common
       run: |
         set -euo pipefail
-        cp ${{ github.action_path }}/patches/bypass.patch "${{ github.workspace }}/AnyKernel3/bypass.patch"
+        FS_H="include/trace/hooks/fs.h"
+        VENDOR_HOOKS_C="drivers/android/vendor_hooks.c"
+
+        if ! grep -q "android_vh_iolimit_rw" "$FS_H"; then
+          perl -0pi -e 's{(DECLARE_HOOK\(android_vh_timerfd_create,\n\tTP_PROTO\(char \*name, int len\),\n\tTP_ARGS\(name, len\)\);\n)}{$1\nDECLARE_HOOK(android_vh_iolimit_rw,\n\tTP_PROTO(struct file *file, size_t count, int rw, unsigned int *delay_ms),\n\tTP_ARGS(file, count, rw, delay_ms));\n}' "$FS_H"
+        fi
+
+        if ! grep -q "EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_iolimit_rw)" "$VENDOR_HOOKS_C"; then
+          perl -0pi -e 's{(EXPORT_TRACEPOINT_SYMBOL_GPL\(android_vh_timerfd_create\);)}{$1\nEXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_iolimit_rw);}' "$VENDOR_HOOKS_C"
+        fi
+
+      
