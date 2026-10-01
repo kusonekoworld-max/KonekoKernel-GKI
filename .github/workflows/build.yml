@@ -97,15 +97,20 @@ jobs:
         else
           OS_PATCH_LEVEL_YM="$OS_PATCH_LEVEL_INPUT"
         fi
+
         FIXED_BUILD_DATE="${OS_PATCH_LEVEL_YM}-05 04:20:00 UTC"
         SOURCE_DATE_EPOCH=$(date -u -d "$FIXED_BUILD_DATE" +%s)
-        echo "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" >> $GITHUB_ENV
+
+        echo "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" >> "$GITHUB_ENV"
+
         KBUILD_TS=$(date -u -d @${SOURCE_DATE_EPOCH} '+%a %b %d %H:%M:%S UTC %Y')
-        echo "KBUILD_BUILD_TIMESTAMP=${KBUILD_TS}" >> $GITHUB_ENV
+        echo "KBUILD_BUILD_TIMESTAMP=${KBUILD_TS}" >> "$GITHUB_ENV"
+
         GIT_DATE=$(date -u -d @${SOURCE_DATE_EPOCH} '+%Y-%m-%dT%H:%M:%SZ')
-        echo "GIT_COMMITTER_DATE=${GIT_DATE}" >> $GITHUB_ENV
-        echo "GIT_AUTHOR_DATE=${GIT_DATE}" >> $GITHUB_ENV
-        echo "Build timestamp set to: $(date -u -d @${SOURCE_DATE_EPOCH} '+%Y-%m-%d %H:%M:%S UTC') (epoch: $SOURCE_DATE_EPOCH)"
+        echo "GIT_COMMITTER_DATE=${GIT_DATE}" >> "$GITHUB_ENV"
+        echo "GIT_AUTHOR_DATE=${GIT_DATE}" >> "$GITHUB_ENV"
+
+        echo "Build timestamp set to: $(date -u -d @${SOURCE_DATE_EPOCH} '+%Y-%m-%d %H:%M:%S UTC')"
 
     - name: Extract Sublevel and Set File Name
       id: extract
@@ -144,7 +149,7 @@ jobs:
         sublevel: ${{ steps.extract.outputs.sublevel }}
 
     - name: Baseband Guard
-      if: (contains(inputs.feature_set, 'BBG') || inputs.feature_set == 'FULL')
+      if: contains(inputs.feature_set, 'BBG') || inputs.feature_set == 'FULL'
       uses: ./.github/actions/bbg
 
     - name: Setup Networking
@@ -213,11 +218,11 @@ jobs:
 
     - name: Scan and collect patch rejects
       id: scan
-      if: ${{ always() }}
+      if: always()
       uses: ./.github/actions/scan-patch-rejects
 
     - name: Upload Rejects
-      if: ${{ always() }}
+      if: always()
       uses: actions/upload-artifact@v7
       with:
         name: ${{ steps.extract.outputs.file_name }}-Rejects
@@ -232,7 +237,7 @@ jobs:
         path: ccache-dl
       continue-on-error: true
 
-    - name: 'Setup Cache and Build Environment'
+    - name: Setup Cache and Build Environment
       uses: ./.github/actions/cache-setup
       with:
         version: ${{ inputs.version }}
@@ -252,7 +257,7 @@ jobs:
         restore_keys: |
           ${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ steps.extract.outputs.sublevel }}-
 
-    - name: Restore lto-cache (ccache versions)
+    - name: Restore lto-cache
       id: restore-lto-ccache
       continue-on-error: true
       if: inputs.version == 'android12-5.10' || inputs.version == 'android13-5.10' || inputs.version == 'android13-5.15'
@@ -282,11 +287,9 @@ jobs:
         CCACHE_HIT="${{ steps.restore-ccache.outputs.cache-hit || 'skipped' }}"
         LTO_CCACHE_HIT="${{ steps.restore-lto-ccache.outputs.cache-hit || 'skipped' }}"
         BAZEL_HIT="${{ steps.restore-bazel.outputs.cache-hit || 'skipped' }}"
-        LTO_BAZEL_HIT="skipped"
         echo "  ccache: $CCACHE_HIT"
         echo "  lto (ccache versions): $LTO_CCACHE_HIT"
         echo "  bazel: $BAZEL_HIT"
-        echo "  lto (bazel versions): $LTO_BAZEL_HIT"
 
     - name: Get Cache Stats
       uses: ./.github/actions/cache-stats
@@ -305,6 +308,23 @@ jobs:
         version: ${{ inputs.version }}
         bypass: false
 
+    - name: Build NoMount MetaModule
+      if: env.NOMOUNT_COMMIT != ''
+      uses: ./.github/actions/nomount-metamodule
+      with:
+        commit: ${{ env.NOMOUNT_COMMIT }}
+
+    - name: Upload NoMount MetaModule
+      if: always() && env.NOMOUNT_COMMIT != ''
+      uses: actions/upload-artifact@v7
+      with:
+        name: NoMount-MetaModule-${{ env.NOMOUNT_COMMIT }}
+        path: |
+          ${{ runner.temp }}/NoMount-${{ env.NOMOUNT_COMMIT }}.zip
+          ${{ runner.temp }}/NoMount-${{ env.NOMOUNT_COMMIT }}.zip.sha256
+        if-no-files-found: error
+        compression-level: 9
+
     - name: Get Cache Stats
       uses: ./.github/actions/cache-stats
       with:
@@ -317,7 +337,7 @@ jobs:
       with:
         cache_path: /home/runner/.ccache
         cache_key: ${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ steps.extract.outputs.sublevel }}-${{ inputs.os_patch_level }}
-        cache_bucket: "ccache-cache"
+        cache_bucket: ccache-cache
         compression_level: 9
         github_token: ${{ secrets.MY_GITHUB_TOKEN }}
 
@@ -328,18 +348,18 @@ jobs:
       with:
         cache_path: /home/runner/.ld_cache
         cache_key: ${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ steps.extract.outputs.sublevel }}-${{ inputs.os_patch_level }}
-        cache_bucket: "lto-cache"
+        cache_bucket: lto-cache
         compression_level: 9
         github_token: ${{ secrets.MY_GITHUB_TOKEN }}
 
     - name: Save bazel-cache
       continue-on-error: true
       uses: ./.github/actions/cache-save
-      if:  inputs.version == 'android14-5.15' || inputs.version == 'android14-6.1' || inputs.version == 'android15-6.6' || inputs.version == 'android16-6.12'
+      if: inputs.version == 'android14-5.15' || inputs.version == 'android14-6.1' || inputs.version == 'android15-6.6' || inputs.version == 'android16-6.12'
       with:
         cache_path: /home/runner/.cache/bazel
         cache_key: ${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ steps.extract.outputs.sublevel }}-${{ inputs.os_patch_level }}
-        cache_bucket: "bazel-cache"
+        cache_bucket: bazel-cache
         compression_level: 9
         github_token: ${{ secrets.MY_GITHUB_TOKEN }}
 
@@ -353,7 +373,7 @@ jobs:
         version: ${{ inputs.version }}
 
     - name: 📋 Consolidated Build Summary
-      if: ${{ always() }}
+      if: always()
       shell: bash
       run: |
         SUMMARY_FILE="/tmp/build-summary-${{ steps.extract.outputs.file_name }}.md"
@@ -365,6 +385,7 @@ jobs:
         fi
 
         KERNEL_VER_STR=""
+
         if [ -f "/home/runner/out/dist/Image" ]; then
           KERNEL_VER_STR=$(strings "/home/runner/out/dist/Image" | grep -m1 "^Linux version " | sed 's/Linux version //' || echo "")
         elif [ -f "/home/runner/out/Image" ]; then
@@ -375,6 +396,7 @@ jobs:
         KSU_TAG="${KSU_GIT_TAG:-N/A}"
 
         SUSFS_VER="N/A"
+
         if [ -f "${{ github.workspace }}/kernel/common/include/linux/susfs.h" ]; then
           SUSFS_VER=$(grep '#define SUSFS_VERSION' "${{ github.workspace }}/kernel/common/include/linux/susfs.h" | awk -F'"' '{print $2}' || echo "N/A")
         fi
@@ -390,9 +412,11 @@ jobs:
           echo "|--------|-------|"
           echo "| **Status** | ${STATUS} |"
           echo "| **Kernel** | ${{ inputs.kernel_version }}.${{ inputs.sublevel }}-${{ inputs.android_version }}-${{ inputs.os_patch_level }} |"
+
           if [ -n "$KERNEL_VER_STR" ]; then
             echo "| **Version String** | \`${KERNEL_VER_STR}\` |"
           fi
+
           echo "| **KSU Version** | ${KSU_VER} |"
           echo "| **KSU Tag** | ${KSU_TAG} |"
           echo "| **SUSFS Version** | ${SUSFS_VER} |"
@@ -408,7 +432,7 @@ jobs:
         } > "$SUMMARY_FILE"
 
     - name: Upload Build Summary Artifact
-      if: ${{ always() }}
+      if: always()
       uses: actions/upload-artifact@v7
       with:
         name: ${{ steps.extract.outputs.file_name }}-Summary
