@@ -1,44 +1,71 @@
 name: 'Build Kernel'
 description: 'Builds kernel using legacy build.sh or Bazel (kleaf)'
 inputs:
-  bypass:
-    description: 'Whether to add the bypass hack or not'
-    required: true
   version:
     description: 'Kernel config version (e.g., android14-6.1)'
     required: true
-
+  page_size:
+    description: 'ARM64 page size: 4k (default, unchanged behaviour) or 16k'
+    required: false
+    type: string
+    default: '4k'
+  allow_version_mismatch:
+    description: 'Whether to force-load version-mismatched modules'
+    required: false
+    type: boolean
+    default: false
+  use_nomount:
+    description: 'Integrate NoMount into the kernel before building (true/false)'
+    required: false
+    type: string
+    default: 'true'
+  nomount_commit:
+    description: 'Full NoMount commit SHA (empty = latest dev branch tip)'
+    required: false
+    type: string
+    default: ''
 runs:
-  using: "composite"
+  using: composite
   steps:
-    - name: 'Activate Bypass'
-      shell: bash
-      working-directory: ${{ github.workspace }}/kernel
-      run: |
-        set -euo pipefail
-        if [ "${{ inputs.bypass }}" = "true" ]; then
-          if [[ ${{ inputs.version }} == "android14-6.1" || ${{ inputs.version }} == "android15-6.6" || ${{ inputs.version }} == "android16-6.12" ]]; then
-            TARGET_FILE="${{ github.workspace }}/kernel/common/kernel/module/version.c"
-          else
-            TARGET_FILE="${{ github.workspace }}/kernel/common/kernel/module.c"
-          fi
+    - name: Setup Kernel Configs
+      if: false
+      uses: ./.github/actions/set-kernel-config
 
-          sed -i '/bad_version:/{:a;n;/return 0;/{s/return 0;/return 1;/;b};ba}' "$TARGET_FILE"
-
-          if ! grep -A 5 "bad_version:" "$TARGET_FILE" | grep -q "return 1;"; then
-            echo "Patch failed! 'return 1;' not found at bad_version:"
-            grep -A 10 "bad_version:" "$TARGET_FILE" || true
-            exit 1
-          fi
-        else
-          echo "Bypass hack not applied as per input parameter."
-        fi
+    # - name: Provide host ld from repo prebuilts
+    #   shell: bash
+    #   run: |
+    #     cd "${{ github.workspace }}/kernel"
+    #     # build.sh REPLACES PATH with 4 repo dirs (build-tools/path,
+    #     # prebuilt clang bin, prebuilts/gas, out/host_tools), so /usr/bin and
+    #     # /usr/local/bin are invisible: apt binutils can NOT fix this. Instead,
+    #     # symlink ld.lld as "ld" inside the prebuilt clang's own bin dir -- the
+    #     # clang driver looks there first, no PATH needed.
+    #     # Dynamic, not hardcoded: resolve CLANG_PREBUILT_BIN exactly the way
+    #     # build.sh does -- source build.config.constants (CLANG_VERSION) then
+    #     # the same BUILD_CONFIG the build uses (build.config.gki.aarch64 chain).
+    #     # ("|| true": runner shell is -e -o pipefail; failures here must fall
+    #     # through to the loud error below, not kill the step silently.)
+    #     CLANG_BIN=""
+    #     if [ -f "common/build.config.gki.aarch64" ]; then
+    #       CLANG_BIN=$(ROOT_DIR="$PWD" KERNEL_DIR=common bash -c '[ -f common/build.config.constants ] && . common/build.config.constants; . common/build.config.gki.aarch64; echo "$CLANG_PREBUILT_BIN"' || true)
+    #     fi
+    #     if [ -n "$CLANG_BIN" ] && [ -d "$CLANG_BIN" ] && [ -f "$CLANG_BIN/ld.lld" ]; then
+    #       echo "Build clang bin (from build.config chain): $CLANG_BIN"
+    #       ln -sf "ld.lld" "$CLANG_BIN/ld"
+    #       ls -la "$CLANG_BIN/ld"
+    #     else
+    #       echo "ERROR: could not resolve build clang (got: '$CLANG_BIN')" >&2
+    #       echo "--- workspace/kernel:" >&2
+    #       ls "${{ github.workspace }}/kernel"
+    #       exit 1
+    #     fi
 
     - name: 'Force Inject Performance & Battery Configs'
       shell: bash
       working-directory: ${{ github.workspace }}/kernel/common
       run: |
         set -euo pipefail
+
         DEFCONFIG="arch/arm64/configs/gki_defconfig"
 
         echo "Injecting custom configs into $DEFCONFIG..."
@@ -93,6 +120,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
+
         TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
 
         mkdir -p "$TARGET_DIR/kernel/sched"
@@ -122,21 +150,34 @@ runs:
           echo "ERROR: failed to wire cpufreq_bara_no_seidou.o into sched/Makefile" >&2
           exit 1
         fi
+
         if ! grep -q "config CPU_FREQ_GOV_BARA_NO_SEIDOU" "$TARGET_DIR/drivers/cpufreq/Kconfig"; then
           echo "ERROR: failed to inject CPU_FREQ_GOV_BARA_NO_SEIDOU Kconfig entry" >&2
           exit 1
         fi
 
+    - name: 'Integrate NoMount'
+      if: inputs.use_nomount == 'true'
+      uses: ./.github/actions/nomount
+      with:
+        commit: ${{ inputs.nomount_commit }}
+        kernel_version: ${{ inputs.version }}
+
     - name: 'Inject MomenToMoiX Driver'
       shell: bash
       run: |
         set -euo pipefail
+
         TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
+
         mkdir -p "$TARGET_DIR/drivers/momx"
+
         cd "${{ github.action_path }}/patches/tenebrion"
+
         cp MomenToMoiX.c "$TARGET_DIR/drivers/momx/MomenToMoiX.c"
         cp Makefile "$TARGET_DIR/drivers/momx/Makefile"
         cp selinux.sh "$TARGET_DIR/drivers/momx/Sekinux.sh"
+
         if ! grep -q "momx/" "$TARGET_DIR/drivers/Makefile"; then
           echo "obj-y += momx/" >> "$TARGET_DIR/drivers/Makefile"
         fi
@@ -146,16 +187,22 @@ runs:
       working-directory: ${{ github.workspace }}/kernel/common
       run: |
         set -euo pipefail
+
         SELINUX_PATCH_PATH="${{ github.action_path }}/patches/tenebrion/selinux.sh"
+
         cp "$SELINUX_PATCH_PATH" ./selinux.sh
         chmod +x ./selinux.sh
+
         RULES_FILE=$(find -L drivers/kernelsu -type f -name "rules.c" 2>/dev/null | head -1)
+
         if [[ -z "$RULES_FILE" ]]; then
           RULES_FILE=$(grep -rl "ksu_allow" . --include="rules.c" 2>/dev/null | head -1)
         fi
+
         if [[ -z "$RULES_FILE" ]]; then
           exit 1
         fi
+
         export SELINUX_RULES_C="$RULES_FILE"
         ./selinux.sh
 
@@ -163,6 +210,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
+
         TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
 
         mkdir -p "$TARGET_DIR/kernel/sched"
@@ -193,6 +241,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
+
         TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
 
         mkdir -p "$TARGET_DIR/kernel/sched"
@@ -227,6 +276,7 @@ runs:
       working-directory: ${{ github.workspace }}/kernel/common
       run: |
         set -euo pipefail
+
         VORPAL_C="kernel/sched/cpufreq_vorpal.c"
 
         if ! grep -q "bool input_ok;" "$VORPAL_C"; then
@@ -245,10 +295,12 @@ runs:
           echo "ERROR: failed to inject 'bool input_ok;' into vorpal_gov_init()" >&2
           exit 1
         fi
+
         if ! grep -q "input_ok = !input_register_handler" "$VORPAL_C"; then
           echo "ERROR: failed to patch input_register_handler() call in vorpal_gov_init()" >&2
           exit 1
         fi
+
         if ! grep -q "if (input_ok)" "$VORPAL_C"; then
           echo "ERROR: failed to guard input_unregister_handler() in vorpal_gov_init() error path" >&2
           exit 1
@@ -259,6 +311,7 @@ runs:
       working-directory: ${{ github.workspace }}/kernel/common
       run: |
         set -euo pipefail
+
         FAIR_C="kernel/sched/fair.c"
 
         if ! grep -q "extern int sched_gaming_active;" "$FAIR_C"; then
@@ -266,7 +319,7 @@ runs:
         fi
 
         if ! grep -q "GAMING_VRUNTIME_STRETCH - 1" "$FAIR_C"; then
-          perl -0pi -e 's{(\tcurr->vruntime \+= calc_delta_fair\(delta_exec, curr\);\n)(\tupdate_min_vruntime\(cfs_rq\);\n)}{$1\n\tif (unlikely(sched_gaming_active \&\& !entity_is_task(curr))) {\n\t\tcurr->vruntime += calc_delta_fair(delta_exec * (GAMING_VRUNTIME_STRETCH - 1), curr);\n\t} else if (unlikely(sched_gaming_active \&\& entity_is_task(curr) \&\&\n\t\t\t     curr->avg.load_avg < 100)) {\n\t\tcurr->vruntime += calc_delta_fair(delta_exec, curr);\n\t}\n$2}' "$FAIR_C"
+          perl -0pi -e 's{(\tcurr->vruntime \+= calc_delta_fair\(delta_exec, curr\);\n)(\tupdate_min_vruntime\(cfs_rq\);\n)}{$1\n\tif (unlikely(sched_gaming_active \&\& !entity_is_task(curr))) {\n\t\tcurr->vruntime += calc_delta_fair(delta_exec * (GAMING_VRUNTIME_STRETCH - 1), curr);\n\t} else if (unlikely(sched_gaming_active \&\& entity_is_task(curr) \&\&\n\t\t\t curr->avg.load_avg < 100)) {\n\t\tcurr->vruntime += calc_delta_fair(delta_exec, curr);\n\t}\n$2}' "$FAIR_C"
         fi
 
         if ! grep -q "ideal_runtime / 2" "$FAIR_C"; then
@@ -288,105 +341,110 @@ runs:
           fi
         done
 
-    - name: 'Inject Axion Vendor Hooks - Binder'
+    - name: 'Build Kernel'
       shell: bash
-      working-directory: ${{ github.workspace }}/kernel/common
+      working-directory: ${{ github.workspace }}/kernel
       run: |
-        set -euo pipefail
-        BINDER_H="include/trace/hooks/binder.h"
-        VENDOR_HOOKS_C="drivers/android/vendor_hooks.c"
-        BINDER_C="drivers/android/binder.c"
-
-        if ! grep -q "android_vh_binder_special_task" "$BINDER_H"; then
-          perl -0pi -e 's{(/\* macro versions of hooks are no longer required \*/)}{
-DECLARE_HOOK(android_vh_binder_special_task,
-\tTP_PROTO(struct binder_transaction *t, struct binder_proc *proc,
-\t\tstruct binder_thread *thread, struct binder_work *w,
-\t\tstruct list_head *head, bool sync, bool *special_task),
-\tTP_ARGS(t, proc, thread, w, head, sync, special_task));
-DECLARE_HOOK(android_vh_binder_proc_transaction_finish,
-\tTP_PROTO(struct binder_proc *proc, struct binder_transaction *t,
-\t\tstruct task_struct *binder_th_task, bool pending_async, bool sync),
-\tTP_ARGS(proc, t, binder_th_task, pending_async, sync));
-DECLARE_HOOK(android_vh_binder_proc_transaction_entry,
-\tTP_PROTO(struct binder_proc *proc, struct binder_transaction *t,
-\tstruct binder_thread **thread, int node_debug_id, bool pending_async,
-\tbool sync, bool *skip),
-\tTP_ARGS(proc, t, thread, node_debug_id, pending_async, sync, skip));
-DECLARE_HOOK(android_vh_binder_select_worklist_ilocked,
-\tTP_PROTO(struct list_head **list, struct binder_thread *thread, struct binder_proc *proc,
-\tint wait_for_proc_work),
-\tTP_ARGS(list, thread, proc, wait_for_proc_work));
-DECLARE_HOOK(android_vh_binder_has_work_ilocked,
-\tTP_PROTO(struct binder_thread *thread, bool do_proc_work, int *ret),
-\tTP_ARGS(thread, do_proc_work, ret));
-DECLARE_HOOK(android_vh_binder_read_done,
-\tTP_PROTO(struct binder_proc *proc, struct binder_thread *thread),
-\tTP_ARGS(proc, thread));
-DECLARE_HOOK(android_vh_binder_looper_state_registered,
-\tTP_PROTO(struct binder_thread *thread, struct binder_proc *proc),
-\tTP_ARGS(thread, proc));
-DECLARE_HOOK(android_vh_binder_thread_release,
-\tTP_PROTO(struct binder_proc *proc, struct binder_thread *thread),
-\tTP_ARGS(proc, thread));
-DECLARE_HOOK(android_vh_binder_free_proc,
-\tTP_PROTO(struct binder_proc *proc),
-\tTP_ARGS(proc));
-
-$1}' "$BINDER_H"
-        fi
-
-        if ! grep -q "EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_binder_special_task)" "$VENDOR_HOOKS_C"; then
-          perl -0pi -e 's{(EXPORT_TRACEPOINT_SYMBOL_GPL\(android_vh_binder_wait_for_work\);)}{$1
-EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_binder_special_task);
-EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_binder_proc_transaction_finish);
-EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_binder_proc_transaction_entry);
-EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_binder_select_worklist_ilocked);
-EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_binder_has_work_ilocked);
-EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_binder_read_done);
-EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_binder_looper_state_registered);
-EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_binder_thread_release);
-EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_binder_free_proc);}' "$VENDOR_HOOKS_C"
-        fi
-
-        if ! grep -q "trace_android_vh_binder_has_work_ilocked" "$BINDER_C"; then
-          perl -0pi -e 's{(static bool binder_has_work_ilocked\(struct binder_thread \*thread,\n\t\t\t\t    bool do_proc_work\)\n\{\n)}{$1\tint ret = 0;\n\n\ttrace_android_vh_binder_has_work_ilocked(thread, do_proc_work, &ret);\n\tif (ret)\n\t\treturn true;\n}' "$BINDER_C"
-        fi
-
-        for MARK in "android_vh_binder_special_task" "android_vh_binder_free_proc"; do
-          if ! grep -qF "$MARK" "$BINDER_H"; then
-            echo "ERROR: failed to inject $MARK into binder.h" >&2
+        PAGE_SIZE="${{ inputs.page_size }}"
+        sed -i 's/check_defconfig//' ./common/build.config.gki
+        if [ -f "build/build.sh" ]; then
+          if [ "$PAGE_SIZE" != "4k" ]; then
+            echo "ERROR: page_size=${PAGE_SIZE} is only supported by the Kleaf (Bazel) build; this tree uses build/build.sh." >&2
             exit 1
           fi
-        done
-        if ! grep -q "EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_binder_special_task)" "$VENDOR_HOOKS_C"; then
-          echo "ERROR: failed to export android_vh_binder_special_task in vendor_hooks.c" >&2
-          exit 1
-        fi
-        if ! grep -q "trace_android_vh_binder_has_work_ilocked" "$BINDER_C"; then
-          echo "ERROR: failed to patch binder_has_work_ilocked in binder.c" >&2
-          exit 1
+          BUILD_GKI_ARTIFACTS="" \
+          BUILD_GKI_CERTIFICATION_TOOLS=0 \
+          BUILD_SYSTEM_DLKM=0 \
+          SKIP_VENDOR_BOOT=1 \
+          SKIP_EXT_MODULES=1 \
+          SKIP_CP_KERNEL_HDR=1 \
+          OUT_DIR="/home/runner/out" \
+          LTO=thin \
+          BUILD_CONFIG=common/build.config.gki.aarch64 \
+          CC="/usr/bin/ccache clang" \
+          CXX="/usr/bin/ccache clang++" \
+          HOSTCC="/usr/bin/ccache clang" \
+          HOSTCXX="/usr/bin/ccache clang++" \
+          build/build.sh -j"$(nproc)"
+        else
+          sed -i '/name = "kernel_aarch64",/a\    check_defconfig = "disabled",' common/BUILD.bazel
+          PAGE_SIZE_FLAGS=()
+          if [ "$PAGE_SIZE" = "16k" ]; then
+            PAGE_SIZE_FLAGS+=(--page_size=16k)
+          fi
+          tools/bazel build \
+            --config=fast \
+            "${PAGE_SIZE_FLAGS[@]}" \
+            --disk_cache=/home/runner/.cache/bazel \
+            //common:kernel_aarch64/Image
         fi
 
-        echo "NOTE: binder_proc_transaction, binder_thread_read, binder_thread_release,"
-        echo "      binder_free_proc, and BC_ENTER_LOOPER call-site injections are NOT"
-        echo "      included yet -- they require exact context matching against this"
-        echo "      kernel's binder.c body, which has only been spot-checked so far."
-
-    - name: 'Inject Axion Vendor Hooks - fs.h iolimit_rw'
+    - name: 'Verify Page Size in Generated .config'
       shell: bash
-      working-directory: ${{ github.workspace }}/kernel/common
+      working-directory: ${{ github.workspace }}/kernel
       run: |
         set -euo pipefail
-        FS_H="include/trace/hooks/fs.h"
-        VENDOR_HOOKS_C="drivers/android/vendor_hooks.c"
+        PAGE_SIZE="${{ inputs.page_size }}"
 
-        if ! grep -q "android_vh_iolimit_rw" "$FS_H"; then
-          perl -0pi -e 's{(DECLARE_HOOK\(android_vh_timerfd_create,\n\tTP_PROTO\(char \*name, int len\),\n\tTP_ARGS\(name, len\)\);\n)}{$1\nDECLARE_HOOK(android_vh_iolimit_rw,\n\tTP_PROTO(struct file *file, size_t count, int rw, unsigned int *delay_ms),\n\tTP_ARGS(file, count, rw, delay_ms));\n}' "$FS_H"
+        # Kleaf writes the resolved .config under the kernel_config rule output
+        # dir; the legacy build.sh writes it into OUT_DIR. Locate it instead of
+        # hardcoding a path that upstream may rename.
+        CONFIG_FILE=""
+        for candidate in \
+          bazel-bin/common/kernel_aarch64_config/out_dir/.config \
+          /home/runner/out/.config; do
+          if [ -f "$candidate" ]; then CONFIG_FILE="$candidate"; break; fi
+        done
+        if [ -z "$CONFIG_FILE" ]; then
+          CONFIG_FILE="$(find bazel-bin/common /home/runner/out -maxdepth 4 -name .config -type f 2>/dev/null | head -n1 || true)"
+        fi
+        if [ -z "$CONFIG_FILE" ]; then
+          if [ "$PAGE_SIZE" != "16k" ]; then
+            # 4k builds are unchanged from before this feature; a missing .config
+            # is a gap in the check, not a reason to fail a working build.
+            echo "WARNING: no .config found; skipping page-size verification for 4k."
+            exit 0
+          fi
+          echo "ERROR: could not locate the generated .config; page size cannot be verified." >&2
+          exit 1
+        fi
+        echo "Verifying page size using $CONFIG_FILE"
+        grep -E '^(# )?CONFIG_ARM64_(4K|16K|64K)_PAGES|^CONFIG_ARM64_PAGE_SHIFT' "$CONFIG_FILE" || true
+
+        if [ "$PAGE_SIZE" = "16k" ]; then
+          want_on="CONFIG_ARM64_16K_PAGES=y"
+          want_off="# CONFIG_ARM64_4K_PAGES is not set"
+        else
+          want_on="CONFIG_ARM64_4K_PAGES=y"
+          want_off="# CONFIG_ARM64_16K_PAGES is not set"
         fi
 
-        if ! grep -q "EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_iolimit_rw)" "$VENDOR_HOOKS_C"; then
-          perl -0pi -e 's{(EXPORT_TRACEPOINT_SYMBOL_GPL\(android_vh_timerfd_create\);)}{$1\nEXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_iolimit_rw);}' "$VENDOR_HOOKS_C"
+        if ! grep -qx "$want_on" "$CONFIG_FILE"; then
+          echo "ERROR: expected '$want_on' in $CONFIG_FILE" >&2
+          grep -E '^(# )?CONFIG_ARM64_(4K|16K|64K)_PAGES' "$CONFIG_FILE" >&2 || true
+          exit 1
+        fi
+        if ! grep -qx "$want_off" "$CONFIG_FILE"; then
+          echo "ERROR: expected '$want_off' in $CONFIG_FILE" >&2
+          grep -E '^(# )?CONFIG_ARM64_(4K|16K|64K)_PAGES' "$CONFIG_FILE" >&2 || true
+          exit 1
+        fi
+        echo "Page size verified: ${PAGE_SIZE}"
+
+    - name: 'Gather Build Artifacts'
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel
+      run: |
+        set -euo pipefail
+        if [ -f "bazel-bin/common/kernel_aarch64/Image" ]; then
+          echo "Found Image at bazel-bin/common/kernel_aarch64/Image"
+          cp "bazel-bin/common/kernel_aarch64/Image" "${{ github.workspace }}/AnyKernel3/Image"
+          exit 0
+        fi
+        if [ -f "/home/runner/out/dist/Image" ]; then
+          echo "Found Image at /home/runner/out/dist/Image"
+          cp "/home/runner/out/dist/Image" "${{ github.workspace }}/AnyKernel3/Image"
+          exit 0
         fi
 
-      
+        exit 1
