@@ -52,7 +52,7 @@ jobs:
 
     - name: Free Disk Space
       if: true
-      uses: endersonmenezes/free-disk-space@v3  # Use @main for latest, @v3 for stable
+      uses: endersonmenezes/free-disk-space@v3
       with:
         remove_android: true
         remove_dotnet: true
@@ -61,21 +61,20 @@ jobs:
         remove_packages: "azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox postgresql* temurin-* *llvm* mysql* dotnet-sdk-*"
         remove_packages_one_command: true
         remove_folders: "/usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle"
-        rm_cmd: "rmz"  # Use 'rmz' for faster deletion (default: 'rm')
-        rmz_version: "3.1.1"  # Required when rm_cmd is 'rmz'
+        rm_cmd: "rmz"
+        rmz_version: "3.1.1"
         testing: false
 
     - name: Setup more Swap (for LTO)
-      uses: thejerrybao/setup-swap-space@v1   # or pierotofy/set-swap-space
+      uses: pierotofy/set-swap-space@master
       with:
-        swap-size-gb: 16          # 10-24 GB is common for heavy LTO
-        # swap-space-path: /mnt/swapfile   # optional
+        swap-size-gb: 16
 
     - name: Setup Build Environment
       uses: ./.github/actions/setup-build-environment
       env:
         BOOT_SIGN_KEY: ${{ secrets.BOOT_SIGN_KEY }}
-          
+
     - name: Download Kernel Repository
       uses: ./.github/actions/download-kernel
       with:
@@ -88,8 +87,6 @@ jobs:
       shell: bash
       run: |
         set -x
-        # Hardcode the build timestamp to the 5th day of the patch level
-        # at 04:20 UTC, using the existing timestamp formats expected by the build.
         OS_PATCH_LEVEL_INPUT="${{ inputs.os_patch_level }}"
         if [[ "$OS_PATCH_LEVEL_INPUT" == lts* ]]; then
           if [[ "$OS_PATCH_LEVEL_INPUT" =~ ^lts-([0-9]{2})$ ]]; then
@@ -105,7 +102,6 @@ jobs:
         echo "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" >> $GITHUB_ENV
         KBUILD_TS=$(date -u -d @${SOURCE_DATE_EPOCH} '+%a %b %d %H:%M:%S UTC %Y')
         echo "KBUILD_BUILD_TIMESTAMP=${KBUILD_TS}" >> $GITHUB_ENV
-        # Keep git metadata aligned with the same fixed timestamp.
         GIT_DATE=$(date -u -d @${SOURCE_DATE_EPOCH} '+%Y-%m-%dT%H:%M:%SZ')
         echo "GIT_COMMITTER_DATE=${GIT_DATE}" >> $GITHUB_ENV
         echo "GIT_AUTHOR_DATE=${GIT_DATE}" >> $GITHUB_ENV
@@ -186,8 +182,6 @@ jobs:
       if: false
       working-directory: ${{ github.workspace }}/kernel
       run: |
-        # ABI compare bypass per kernel/android version
-        # Edit each block as needed per version
         if [[ "$ANDROID_VERSION" == "android12" && "$KERNEL_VERSION" == "5.10" ]]; then
           sed -i 's/^\s*exit 1$/    echo "Who Cares? Bypassing Now!"/' build/abi/compare_to_symbol_list
         elif [[ "$ANDROID_VERSION" == "android13" && "$KERNEL_VERSION" == "5.10" ]]; then
@@ -221,7 +215,7 @@ jobs:
       id: scan
       if: ${{ always() }}
       uses: ./.github/actions/scan-patch-rejects
-        
+
     - name: Upload Rejects
       if: ${{ always() }}
       uses: actions/upload-artifact@v7
@@ -363,41 +357,32 @@ jobs:
       shell: bash
       run: |
         SUMMARY_FILE="/tmp/build-summary-${{ steps.extract.outputs.file_name }}.md"
-        
-        # Determine build status
+
         if [ "${{ job.status }}" = "success" ]; then
           STATUS="✅ Success"
         else
           STATUS="❌ Failed"
         fi
-        
-        # Get kernel version from Image if available
+
         KERNEL_VER_STR=""
         if [ -f "/home/runner/out/dist/Image" ]; then
           KERNEL_VER_STR=$(strings "/home/runner/out/dist/Image" | grep -m1 "^Linux version " | sed 's/Linux version //' || echo "")
         elif [ -f "/home/runner/out/Image" ]; then
           KERNEL_VER_STR=$(strings "/home/runner/out/Image" | grep -m1 "^Linux version " | sed 's/Linux version //' || echo "")
         fi
-        
-        # Get KSU version from env (set by kernelsu action)
+
         KSU_VER="${KSU_VERSION:-N/A}"
         KSU_TAG="${KSU_GIT_TAG:-N/A}"
-        
-        # Get SUSFS version from susfs.h if available
+
         SUSFS_VER="N/A"
         if [ -f "${{ github.workspace }}/kernel/common/include/linux/susfs.h" ]; then
           SUSFS_VER=$(grep '#define SUSFS_VERSION' "${{ github.workspace }}/kernel/common/include/linux/susfs.h" | awk -F'"' '{print $2}' || echo "N/A")
         fi
-        
-        # Get cache stats from env (set by cache-stats action)
+
         CCACHE_HIT="${CCACHE_HIT_RATE:-N/A}"
-        
-        # Get build time (approximate from step timing)
         BUILD_TIME="N/A"
-        
-        # Count warnings from build log if available
         WARNINGS="N/A"
-        
+
         {
           echo "## ${{ inputs.android_version }} ${{ inputs.kernel_version }}.${{ inputs.sublevel }} (${{ inputs.variant }}) — ${STATUS}"
           echo
@@ -414,8 +399,7 @@ jobs:
           echo "| **Feature Set** | ${{ inputs.feature_set }} |"
           echo "| **Variant** | ${{ inputs.variant }} |"
           echo
-          
-          # Kernel Fixes
+
           if [ -f /tmp/kernel-fixes-summary.md ]; then
             echo "### 🔧 Kernel Fixes"
             cat /tmp/kernel-fixes-summary.md
