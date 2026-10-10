@@ -111,11 +111,12 @@ runs:
       run: |
         set -euo pipefail
         TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
+        PATCH_DIR="${{ github.action_path }}/patches/tenebrion"
+        echo "Contents of $PATCH_DIR:"
+        ls -la "$PATCH_DIR"
         mkdir -p "$TARGET_DIR/drivers/momx"
-        cd "${{ github.action_path }}/patches/tenebrion"
-        cp MomenToMoiX.c "$TARGET_DIR/drivers/momx/MomenToMoiX.c"
-        cp Makefile "$TARGET_DIR/drivers/momx/Makefile"
-        cp selinux.sh "$TARGET_DIR/drivers/momx/Sekinux.sh"
+        cp "$PATCH_DIR/MomenToMoiX.c" "$TARGET_DIR/drivers/momx/MomenToMoiX.c"
+        cp "$PATCH_DIR/Makefile" "$TARGET_DIR/drivers/momx/Makefile"
         if ! grep -q "momx/" "$TARGET_DIR/drivers/Makefile"; then
           echo "obj-y += momx/" >> "$TARGET_DIR/drivers/Makefile"
         fi
@@ -125,7 +126,13 @@ runs:
       working-directory: ${{ github.workspace }}/kernel/common
       run: |
         set -euo pipefail
-        SELINUX_PATCH_PATH="${{ github.action_path }}/patches/tenebrion/selinux.sh"
+        PATCH_DIR="${{ github.action_path }}/patches/tenebrion"
+        SELINUX_PATCH_PATH="$(find "$PATCH_DIR" -maxdepth 1 -type f -iname 'selinux.sh' | head -1)"
+        if [[ -z "$SELINUX_PATCH_PATH" ]]; then
+          echo "ERROR: selinux.sh not found in $PATCH_DIR" >&2
+          ls -la "$PATCH_DIR" >&2
+          exit 1
+        fi
         cp "$SELINUX_PATCH_PATH" ./selinux.sh
         chmod +x ./selinux.sh
         RULES_FILE=$(find -L drivers/kernelsu -type f -name "rules.c" 2>/dev/null | head -1)
@@ -138,6 +145,191 @@ runs:
         fi
         export SELINUX_RULES_C="$RULES_FILE"
         ./selinux.sh
+
+    - name: 'Inject Reflex Governor'
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
+        REFLEX_SRC="${{ github.action_path }}/patches/reflex/cpufreq_reflex.c"
+
+        if [ ! -f "$REFLEX_SRC" ]; then
+          echo "ERROR: cpufreq_reflex.c not found at $REFLEX_SRC" >&2
+          ls -la "${{ github.action_path }}/patches" >&2 || true
+          ls -la "${{ github.action_path }}/patches/reflex" >&2 || true
+          exit 1
+        fi
+
+        mkdir -p "$TARGET_DIR/kernel/sched"
+        cp "$REFLEX_SRC" "$TARGET_DIR/kernel/sched/cpufreq_reflex.c"
+
+        if ! grep -q "cpufreq_reflex.o" "$TARGET_DIR/kernel/sched/Makefile"; then
+          echo 'obj-$(CONFIG_CPU_FREQ_GOV_REFLEX) += cpufreq_reflex.o' >> "$TARGET_DIR/kernel/sched/Makefile"
+        fi
+
+        if ! grep -q "config CPU_FREQ_GOV_REFLEX" "$TARGET_DIR/drivers/cpufreq/Kconfig"; then
+          printf "\nconfig CPU_FREQ_GOV_REFLEX\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+          printf "\ttristate \"'reflex' cpufreq governor\"\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+          printf "\tdepends on CPU_FREQ && SMP\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+          printf "\tselect CPU_FREQ_GOV_ATTR_SET\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+          printf "\thelp\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+          printf "\t  'reflex' is an advanced CPU frequency governor based on schedutil,\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+          printf "\t  featuring idle-time accounting and PELT-complementary exponential decay.\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+        fi
+
+        DEFCONFIG_GKI="$TARGET_DIR/arch/arm64/configs/gki_defconfig"
+        if [ -f "$DEFCONFIG_GKI" ]; then
+          if ! grep -q "CONFIG_CPU_FREQ_GOV_REFLEX" "$DEFCONFIG_GKI"; then
+            echo "CONFIG_CPU_FREQ_GOV_REFLEX=y" >> "$DEFCONFIG_GKI"
+          fi
+        fi
+
+        echo "Reflex governor injected."
+
+    - name: 'Inject Vorpal Governor + GKI510 Compat'
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
+
+        mkdir -p "$TARGET_DIR/kernel/sched"
+        cp "${{ github.action_path }}/patches/vorpal/cpufreq_vorpal.c" "$TARGET_DIR/kernel/sched/cpufreq_vorpal.c"
+        cp "${{ github.action_path }}/patches/vorpal/rfx_gki510_compat.c" "$TARGET_DIR/kernel/sched/rfx_gki510_compat.c"
+
+        if ! grep -q "cpufreq_vorpal.o" "$TARGET_DIR/kernel/sched/Makefile"; then
+          echo 'obj-$(CONFIG_CPU_FREQ_GOV_VORPAL) += cpufreq_vorpal.o' >> "$TARGET_DIR/kernel/sched/Makefile"
+        fi
+
+        if ! grep -q "rfx_gki510_compat.o" "$TARGET_DIR/kernel/sched/Makefile"; then
+          echo 'obj-y += rfx_gki510_compat.o' >> "$TARGET_DIR/kernel/sched/Makefile"
+        fi
+
+        if ! grep -q "config CPU_FREQ_GOV_VORPAL" "$TARGET_DIR/drivers/cpufreq/Kconfig"; then
+          printf "\nconfig CPU_FREQ_GOV_VORPAL\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+          printf "\ttristate \"'vorpal' cpufreq governor\"\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+          printf "\tdepends on CPU_FREQ && SMP\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+          printf "\tselect CPU_FREQ_GOV_ATTR_SET\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+          printf "\thelp\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+          printf "\t  'vorpal' is a schedutil-based governor tuned for\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+          printf "\t  gaming/thermal-aware dual-profile operation.\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+        fi
+
+        DEFCONFIG_GKI="$TARGET_DIR/arch/arm64/configs/gki_defconfig"
+        if [ -f "$DEFCONFIG_GKI" ] && ! grep -q "CONFIG_CPU_FREQ_GOV_VORPAL" "$DEFCONFIG_GKI"; then
+          echo "CONFIG_CPU_FREQ_GOV_VORPAL=y" >> "$DEFCONFIG_GKI"
+        fi
+
+    - name: 'Fix Vorpal Input-Handler Init Bug'
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        set -euo pipefail
+
+        VORPAL_C="kernel/sched/cpufreq_vorpal.c"
+
+        if ! grep -q "bool input_ok;" "$VORPAL_C"; then
+          perl -0pi -e 's{(static int __init vorpal_gov_init\(void\)\n\{\n\tint ret;\n)}{$1\tbool input_ok;\n}' "$VORPAL_C"
+        fi
+
+        if ! grep -q "input_ok = !input_register_handler" "$VORPAL_C"; then
+          perl -0pi -e 's{\tif \(input_register_handler\(&rfx_input_handler\)\)\n\t\tpr_warn\("vorpal: input handler register failed \(touch boost off\)\\n"\);}{\tinput_ok = !input_register_handler(&rfx_input_handler);\n\tif (!input_ok)\n\t\tpr_warn("vorpal: input handler register failed (touch boost off)\\n");}' "$VORPAL_C"
+        fi
+
+        if ! grep -q "if (input_ok)" "$VORPAL_C"; then
+          perl -0pi -e 's{\tret = cpufreq_register_governor\(&vorpal_gov\);\n\tif \(ret\) \{\n\t\tinput_unregister_handler\(&rfx_input_handler\);\n\t\tcancel_delayed_work_sync\(&rfx_thermal_work\);\n\t\}}{\tret = cpufreq_register_governor(&vorpal_gov);\n\tif (ret) \{\n\t\tif (input_ok)\n\t\t\tinput_unregister_handler(&rfx_input_handler);\n\t\tcancel_delayed_work_sync(&rfx_thermal_work);\n\t\}}' "$VORPAL_C"
+        fi
+
+        if ! grep -q "bool input_ok;" "$VORPAL_C"; then
+          echo "ERROR: failed to inject 'bool input_ok;' into vorpal_gov_init()" >&2
+          exit 1
+        fi
+
+        if ! grep -q "input_ok = !input_register_handler" "$VORPAL_C"; then
+          echo "ERROR: failed to patch input_register_handler() call in vorpal_gov_init()" >&2
+          exit 1
+        fi
+
+        if ! grep -q "if (input_ok)" "$VORPAL_C"; then
+          echo "ERROR: failed to guard input_unregister_handler() in vorpal_gov_init() error path" >&2
+          exit 1
+        fi
+
+    - name: 'Inject Vorpal Gaming-Mode Bias into fair.c'
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        set -euo pipefail
+
+        FAIR_C="kernel/sched/fair.c"
+
+        if ! grep -q "extern int sched_gaming_active;" "$FAIR_C"; then
+          perl -0pi -e 's{(static unsigned int normalized_sysctl_sched_latency\s*=\s*6000000ULL;)}{$1\n\nextern int sched_gaming_active;\n\n#define GAMING_VRUNTIME_STRETCH\t\t4\n}' "$FAIR_C"
+        fi
+
+        if ! grep -q "GAMING_VRUNTIME_STRETCH - 1" "$FAIR_C"; then
+          perl -0pi -e 's{(\tcurr->vruntime \+= calc_delta_fair\(delta_exec, curr\);\n)(\tupdate_min_vruntime\(cfs_rq\);\n)}{$1\n\tif (unlikely(sched_gaming_active \&\& !entity_is_task(curr))) {\n\t\tcurr->vruntime += calc_delta_fair(delta_exec * (GAMING_VRUNTIME_STRETCH - 1), curr);\n\t} else if (unlikely(sched_gaming_active \&\& entity_is_task(curr) \&\&\n\t\t\t curr->avg.load_avg < 100)) {\n\t\tcurr->vruntime += calc_delta_fair(delta_exec, curr);\n\t}\n$2}' "$FAIR_C"
+        fi
+
+        if ! grep -q "ideal_runtime / 2" "$FAIR_C"; then
+          perl -0pi -e 's{(\tdelta_exec = curr->sum_exec_runtime - curr->prev_sum_exec_runtime;\n)(\ttrace_android_rvh_check_preempt_tick)}{$1\n\tif (unlikely(sched_gaming_active) \&\& entity_is_task(curr)) {\n\t\tstruct task_struct *p = task_of(curr);\n\n\t\tif (p->static_prio > DEFAULT_PRIO \&\n\t\t    delta_exec > ideal_runtime / 2)\n\t\t\tresched_curr(rq_of(cfs_rq));\n\t}\n\n$2}' "$FAIR_C"
+        fi
+
+        if ! grep -q "NSEC_PER_MSEC" "$FAIR_C"; then
+          perl -0pi -e 's{(\tfor_each_sched_entity\(se\) \{\n\t\tcfs_rq = cfs_rq_of\(se\);\n\n)(\t\tupdate_load_avg\(cfs_rq, se, UPDATE_TG\);\n\t\tse_update_runnable\(se\);\n\t\tupdate_cfs_group\(se\);)}{$1\t\tif (unlikely(sched_gaming_active \&\& entity_is_task(se) \&\&\n\t\t\t     task_of(se)->static_prio <= DEFAULT_PRIO))\n\t\t\tse->vruntime -= min_t(u64, se->vruntime, NSEC_PER_MSEC);\n\n$2}' "$FAIR_C"
+        fi
+
+        if ! grep -q "Gaming task isolation" "$FAIR_C"; then
+          perl -0pi -e 's{(\tdelta = rq_clock_task\(env->src_rq\) - p->se\.exec_start;\n\n)(\treturn delta < \(s64\)sysctl_sched_migration_cost;\n\}\n)}{$1\t/* Gaming task isolation */\n\tif (sched_gaming_active) {\n\t\tif (capacity_orig_of(env->dst_cpu) < capacity_orig_of(env->src_cpu) \&\&\n\t\t    task_util(p) > (capacity_orig_of(env->src_cpu) >> 3))\n\t\t\treturn 1;\n\t\treturn delta < (s64)sysctl_sched_migration_cost * 2;\n\t}\n\n$2}' "$FAIR_C"
+        fi
+
+        for MARK in "extern int sched_gaming_active;" "GAMING_VRUNTIME_STRETCH - 1" "ideal_runtime / 2" "NSEC_PER_MSEC" "Gaming task isolation"; do
+          if ! grep -qF "$MARK" "$FAIR_C"; then
+            echo "ERROR: failed to inject fair.c gaming patch, missing marker: $MARK" >&2
+            exit 1
+          fi
+        done
+
+    - name: 'Inject Bara-no-Seidou Governor'
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        TARGET_DIR="$GITHUB_WORKSPACE/kernel/common"
+
+        mkdir -p "$TARGET_DIR/kernel/sched"
+        cp "${{ github.action_path }}/patches/bara-no-seidou/cpufreq_bara_no_seidou.c" "$TARGET_DIR/kernel/sched/cpufreq_bara_no_seidou.c"
+
+        if ! grep -q "cpufreq_bara_no_seidou.o" "$TARGET_DIR/kernel/sched/Makefile"; then
+          echo 'obj-$(CONFIG_CPU_FREQ_GOV_BARA_NO_SEIDOU) += cpufreq_bara_no_seidou.o' >> "$TARGET_DIR/kernel/sched/Makefile"
+        fi
+
+        if ! grep -q "config CPU_FREQ_GOV_BARA_NO_SEIDOU" "$TARGET_DIR/drivers/cpufreq/Kconfig"; then
+          printf "\nconfig CPU_FREQ_GOV_BARA_NO_SEIDOU\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+          printf "\ttristate \"'bara-no-seidou' cpufreq governor\"\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+          printf "\tdepends on CPU_FREQ && SMP && INPUT\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+          printf "\tselect CPU_FREQ_GOV_ATTR_SET\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+          printf "\thelp\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+          printf "\t  'bara-no-seidou' is a schedutil-based governor tuned for\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+          printf "\t  battery efficiency with an automatic gaming-mode switch,\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+          printf "\t  touch-boost smoothing, and PSI-aware tuning.\n" >> "$TARGET_DIR/drivers/cpufreq/Kconfig"
+        fi
+
+        DEFCONFIG_GKI="$TARGET_DIR/arch/arm64/configs/gki_defconfig"
+        if [ -f "$DEFCONFIG_GKI" ] && ! grep -q "CONFIG_CPU_FREQ_GOV_BARA_NO_SEIDOU" "$DEFCONFIG_GKI"; then
+          echo "CONFIG_CPU_FREQ_GOV_BARA_NO_SEIDOU=y" >> "$DEFCONFIG_GKI"
+        fi
+
+        if ! grep -q "cpufreq_bara_no_seidou.o" "$TARGET_DIR/kernel/sched/Makefile"; then
+          echo "ERROR: failed to wire cpufreq_bara_no_seidou.o into sched/Makefile" >&2
+          exit 1
+        fi
+
+        if ! grep -q "config CPU_FREQ_GOV_BARA_NO_SEIDOU" "$TARGET_DIR/drivers/cpufreq/Kconfig"; then
+          echo "ERROR: failed to inject CPU_FREQ_GOV_BARA_NO_SEIDOU Kconfig entry" >&2
+          exit 1
+        fi
 
     - name: 'Build Kernel'
       shell: bash
