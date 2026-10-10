@@ -49,6 +49,63 @@ runs:
     #       ls "${{ github.workspace }}/kernel"
     #       exit 1
     #     fi
+    
+    - name: 'Force Inject Performance & Battery Configs'
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        set -euo pipefail
+
+        DEFCONFIG="arch/arm64/configs/gki_defconfig"
+
+        echo "Injecting custom configs into $DEFCONFIG..."
+
+        cat << 'EOF' >> "$DEFCONFIG"
+        CONFIG_ZRAM=m
+        CONFIG_ZRAM_DEF_COMP_ZSTD=y
+        CONFIG_ZSMALLOC=m
+        CONFIG_ZSMALLOC_STAT=y
+        CONFIG_LRU_GEN=y
+        CONFIG_LRU_GEN_ENABLED=y
+        CONFIG_LRU_GEN_STATS=n
+        CONFIG_COMPACTION=y
+        CONFIG_MIGRATION=y
+        CONFIG_KSM=y
+        CONFIG_TRANSPARENT_HUGEPAGE=y
+        CONFIG_IOSCHED_BFQ=y
+        CONFIG_BFQ_GROUP_IOSCHED=y
+        CONFIG_MQ_IOSCHED_DEADLINE=y
+        CONFIG_PREEMPT=y
+        CONFIG_PSI=y
+        CONFIG_PREEMPT_NONE=n
+        CONFIG_PREEMPT_VOLUNTARY=n
+        CONFIG_HIGH_RES_TIMERS=y
+        CONFIG_TCP_FASTOPEN=y
+        CONFIG_CPU_IDLE=y
+        CONFIG_CPU_IDLE_GOV_MENU=y
+        CONFIG_CPU_IDLE_GOV_TEO=y
+        CONFIG_WQ_POWER_EFFICIENT_DEFAULT=y
+        CONFIG_PM_WAKELOCKS=y
+        CONFIG_PM_WAKELOCKS_LIMIT=100
+        CONFIG_PM_WAKELOCKS_GC=y
+        CONFIG_SUSPEND=y
+        CONFIG_DEVFREQ_GOV_PERFORMANCE=y
+        CONFIG_DEVFREQ_GOV_PASSIVE=y
+        CONFIG_UCLAMP_TASK=y
+        CONFIG_UCLAMP_TASK_GROUP=y
+        CONFIG_CMA=y
+        CONFIG_DMA_CMA=y
+        CONFIG_MQ_IOSCHED_KYBER=y
+        CONFIG_SUSPEND_FREEZER=y
+        CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y
+        CONFIG_ENERGY_MODEL=y
+        CONFIG_SCHED_MC=y
+        CONFIG_NO_HZ_IDLE=y
+        CONFIG_NO_HZ_FULL=n
+        EOF
+
+        echo "Configs injected successfully."
+
   
     - name: 'Inject MomenToMoiX Driver'
     shell: bash
