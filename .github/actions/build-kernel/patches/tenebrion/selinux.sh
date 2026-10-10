@@ -17,6 +17,7 @@ if [[ ! -f "$SELINUX_RULES_C" ]]; then
 fi
 
 MARKER='rcu_assign_pointer(selinux_state.policy, pol);'
+BLOCK_TAG='/* tenebrion selinux rules */'
 
 if ! grep -qF "$MARKER" "$SELINUX_RULES_C"; then
     echo "selinux.sh: ERROR — marker line tidak ditemukan di $SELINUX_RULES_C"
@@ -28,60 +29,63 @@ if ! grep -q "ksu_allow" "$SELINUX_RULES_C"; then
     exit 1
 fi
 
+# Sudah pernah di-inject? Jangan dobel.
+if grep -qF "$BLOCK_TAG" "$SELINUX_RULES_C"; then
+    echo "selinux.sh: rules sudah ter-inject sebelumnya, skip"
+    exit 0
+fi
+
+RULES_TMP="$(mktemp)"
+OUT_TMP="$(mktemp)"
+trap 'rm -f "$RULES_TMP" "$OUT_TMP"' EXIT
+
+# emit <target_type> <class> <perm...>   (source selalu "kernel")
+emit() {
+    local tgt="$1" cls="$2" p
+    shift 2
+    for p in "$@"; do
+        printf '    ksu_allow(db, "kernel", "%s", "%s", "%s");\n' \
+            "$tgt" "$cls" "$p" >> "$RULES_TMP"
+    done
+}
+
+printf '    %s\n' "$BLOCK_TAG" >> "$RULES_TMP"
+
+# Read-only sysfs
+for T in sysfs_leds sysfs_backlight sysfs_drm sysfs_type sysfs \
+         sysfs_thermal sysfs_battery_supply; do
+    emit "$T" dir  search getattr
+    emit "$T" file read open getattr
+done
+
+# cgroup (cpuset isolation dari momx_watch)
+emit cgroup dir  search write getattr
+emit cgroup file read write open getattr
+
+# sysfs memory: AOSP label + vendor label.
+# Denial di log: tcontext=vendor_sysfs_memory, name="scheduler" -> write.
+for T in sysfs_memory vendor_sysfs_memory; do
+    emit "$T" dir  search getattr
+    emit "$T" file read write open getattr
+done
+
+# Denial di log: { dac_override } tclass=capability, scontext=kernel
+emit kernel capability dac_override
+
 BEFORE_LINES=$(wc -l < "$SELINUX_RULES_C")
 
 echo "selinux.sh: Injecting Tenebrion SELinux rules ke $SELINUX_RULES_C..."
 
-sed -i "/${MARKER//\//\\/}/i\\
-    ksu_allow(db, \"kernel\", \"sysfs_leds\", \"dir\", \"search\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_leds\", \"dir\", \"getattr\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_leds\", \"file\", \"read\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_leds\", \"file\", \"open\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_leds\", \"file\", \"getattr\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_backlight\", \"dir\", \"search\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_backlight\", \"dir\", \"getattr\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_backlight\", \"file\", \"read\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_backlight\", \"file\", \"open\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_backlight\", \"file\", \"getattr\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_drm\", \"dir\", \"search\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_drm\", \"dir\", \"getattr\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_drm\", \"file\", \"read\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_drm\", \"file\", \"open\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_drm\", \"file\", \"getattr\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_type\", \"dir\", \"search\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_type\", \"dir\", \"getattr\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_type\", \"file\", \"read\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_type\", \"file\", \"open\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_type\", \"file\", \"getattr\");\\
-    ksu_allow(db, \"kernel\", \"sysfs\", \"dir\", \"search\");\\
-    ksu_allow(db, \"kernel\", \"sysfs\", \"dir\", \"getattr\");\\
-    ksu_allow(db, \"kernel\", \"sysfs\", \"file\", \"read\");\\
-    ksu_allow(db, \"kernel\", \"sysfs\", \"file\", \"open\");\\
-    ksu_allow(db, \"kernel\", \"sysfs\", \"file\", \"getattr\");\\
-    ksu_allow(db, \"kernel\", \"cgroup\", \"dir\", \"search\");\\
-    ksu_allow(db, \"kernel\", \"cgroup\", \"dir\", \"write\");\\
-    ksu_allow(db, \"kernel\", \"cgroup\", \"dir\", \"getattr\");\\
-    ksu_allow(db, \"kernel\", \"cgroup\", \"file\", \"read\");\\
-    ksu_allow(db, \"kernel\", \"cgroup\", \"file\", \"write\");\\
-    ksu_allow(db, \"kernel\", \"cgroup\", \"file\", \"open\");\\
-    ksu_allow(db, \"kernel\", \"cgroup\", \"file\", \"getattr\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_memory\", \"dir\", \"search\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_memory\", \"dir\", \"getattr\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_memory\", \"file\", \"read\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_memory\", \"file\", \"write\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_memory\", \"file\", \"open\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_memory\", \"file\", \"getattr\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_thermal\", \"dir\", \"search\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_thermal\", \"dir\", \"getattr\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_thermal\", \"file\", \"read\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_thermal\", \"file\", \"open\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_thermal\", \"file\", \"getattr\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_battery_supply\", \"dir\", \"search\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_battery_supply\", \"dir\", \"getattr\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_battery_supply\", \"file\", \"read\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_battery_supply\", \"file\", \"open\");\\
-    ksu_allow(db, \"kernel\", \"sysfs_battery_supply\", \"file\", \"getattr\");" \
-    "$SELINUX_RULES_C"
+# Sisipkan blok rules tepat sebelum setiap baris marker
+awk -v marker="$MARKER" -v rules="$RULES_TMP" '
+    index($0, marker) {
+        while ((getline line < rules) > 0) print line
+        close(rules)
+    }
+    { print }
+' "$SELINUX_RULES_C" > "$OUT_TMP"
+
+cat "$OUT_TMP" > "$SELINUX_RULES_C"
 
 AFTER_LINES=$(wc -l < "$SELINUX_RULES_C")
 
@@ -89,5 +93,12 @@ if [[ "$AFTER_LINES" -le "$BEFORE_LINES" ]]; then
     echo "selinux.sh: ERROR — injeksi GAGAL, jumlah baris tidak bertambah ($BEFORE_LINES → $AFTER_LINES)"
     exit 1
 fi
+
+for CHECK in '"vendor_sysfs_memory", "file", "write"' '"capability", "dac_override"'; do
+    if ! grep -qF "$CHECK" "$SELINUX_RULES_C"; then
+        echo "selinux.sh: ERROR — rule $CHECK tidak ada setelah injeksi"
+        exit 1
+    fi
+done
 
 echo "selinux.sh: ✅ Tenebrion SELinux rules berhasil di-inject ($BEFORE_LINES → $AFTER_LINES baris)"
