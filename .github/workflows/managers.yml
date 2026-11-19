@@ -17,6 +17,7 @@ on:
           - ReSukiSU
           - SukiSU-Ultra
           - KowSU
+          - KazeSU
           - No Root
           - KernelSU-Next-SUSFS
         default: All
@@ -89,6 +90,21 @@ on:
         default: false
 
 jobs:
+  validate-source-build-support:
+    if: ${{ inputs.build_from_source }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject unsupported from-source managers
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.root_flavor }}" = "KazeSU" ]; then
+            echo "ERROR: KazeSU managers must be fetched as official release APKs (set build_from_source=false)." >&2
+            echo "CI-built KazeSU APKs use a different certificate and the kernel rejects them." >&2
+            exit 1
+          fi
+          echo "Source build selection supported."
+
   # ── path A: fetch prebuilt manager APKs from upstream CI (default) ──
   resolve-managers:
     if: ${{ !inputs.build_from_source }}
@@ -323,6 +339,28 @@ jobs:
                   "$flavor" "$owner" "$repo" "$run_id" "$stock"
                 ;;
 
+              kazesu)
+                # Official manager APKs are only published as release assets;
+                # CI artifacts are signed with a different key and rejected by
+                # the kernel. Pull the latest non-prerelease release instead.
+                owner="KazeSU"; repo="KazeSU"
+                tag=$(curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+                  -H "Authorization: Bearer ${GH_TOKEN}" \
+                  https://api.github.com/repos/KazeSU/KazeSU/releases/latest | jq -r '.tag_name // empty' || true)
+                if [ -n "$tag" ]; then
+                  stock=$(resolve_sha https://github.com/KazeSU/KazeSU.git "refs/tags/${tag}^{}")
+                  [ -n "$stock" ] || stock=$(resolve_sha https://github.com/KazeSU/KazeSU.git "refs/tags/${tag}")
+                else
+                  stock=$(resolve_sha https://github.com/KazeSU/KazeSU.git refs/heads/main)
+                fi
+                if ! [[ "$stock" =~ ^[0-9a-f]{40}$ ]]; then
+                  echo "ERROR: failed to resolve KazeSU release commit" >&2
+                  exit 1
+                fi
+                printf '{"flavor":"%s","owner":"%s","repo":"%s","source":"release","run_id":null,"stock":"%s","want":""}' \
+                  "$flavor" "$owner" "$repo" "$stock"
+                ;;
+
               *)
                 echo "skipping unknown flavor: $flavor" >&2
                 return 0
@@ -341,6 +379,7 @@ jobs:
             ReSukiSU) LIST=$(jq -c -n '[inputs]' <<< "$(resolve_one resukisu)") ;;
             SukiSU-Ultra) LIST=$(jq -c -n '[inputs]' <<< "$(resolve_one sukisu-ultra)") ;;
             KowSU) LIST=$(jq -c -n '[inputs]' <<< "$(resolve_one kowsu)") ;;
+            KazeSU) LIST=$(jq -c -n '[inputs]' <<< "$(resolve_one kazesu)") ;;
             *) echo "Skipping manager resolution (no root flavor / none)." ;;
           esac
           if [ -n "$LIST" ]; then
@@ -378,7 +417,7 @@ jobs:
           rm -rf "$OUT_APKS" "$MANIFEST"
           mkdir -p "$OUT_APKS"
           : > "$MANIFEST"
-          echo "$MANAGER_LIST" | jq -c '.[] | select(.run_id != null and .run_id != "null")' | while read -r M; do
+          echo "$MANAGER_LIST" | jq -c '.[] | select(.source == "release" or (.run_id != null and .run_id != "null"))' | while read -r M; do
             OWNER=$(echo "$M" | jq -r .owner)
             REPO=$(echo "$M" | jq -r .repo)
             SRC=$(echo "$M" | jq -r .source)
@@ -1103,6 +1142,7 @@ jobs:
               "ReSukiSU": env("RESUKISU_COMMIT") or "latest tip",
               "SukiSU-Ultra": env("SUKISU_ULTRA_COMMIT") or "latest tip",
               "KowSU": "latest tip",
+              "KazeSU": "latest release",
               "KernelSU-Next-SUSFS": env("NEXT_SUSFS_COMMIT") or "latest dev-susfs tip",
           }
           # enrich from fetch path manager_list (pure commit info, same style as prebuilt)
@@ -1110,7 +1150,7 @@ jobs:
           if raw:
               try:
                   for m in json.loads(raw):
-                      label = {"next":"KernelSU-Next","kernelsu":"KernelSU","resukisu":"ReSukiSU","sukisu-ultra":"SukiSU-Ultra","kowsu":"KowSU","next-susfs":"KernelSU-Next-SUSFS"}.get(m.get("flavor",""), "")
+                      label = {"next":"KernelSU-Next","kernelsu":"KernelSU","resukisu":"ReSukiSU","sukisu-ultra":"SukiSU-Ultra","kowsu":"KowSU","kazesu":"KazeSU","next-susfs":"KernelSU-Next-SUSFS"}.get(m.get("flavor",""), "")
                       if label and m.get("stock"):
                           commits[label] = m["stock"]
               except: pass

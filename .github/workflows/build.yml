@@ -264,6 +264,22 @@ jobs:
           CONFIG_KSU_SUSFS_OPEN_REDIRECT=n
           CONFIG_KSU_SUSFS_SUS_MAP=n
 
+    - name: Disable SUSFS for KazeSU without SUSFS feature
+      if: inputs.root_flavor == 'kazesu' && !contains(inputs.feature_set, 'SUSFS')
+      uses: ./.github/actions/set-kernel-config
+      with:
+        config_list: |
+          CONFIG_KSU_SUSFS=n
+          CONFIG_KSU_SUSFS_SUS_PATH=n
+          CONFIG_KSU_SUSFS_SUS_MOUNT=n
+          CONFIG_KSU_SUSFS_SUS_KSTAT=n
+          CONFIG_KSU_SUSFS_SPOOF_UNAME=n
+          CONFIG_KSU_SUSFS_ENABLE_LOG=n
+          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=n
+          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=n
+          CONFIG_KSU_SUSFS_OPEN_REDIRECT=n
+          CONFIG_KSU_SUSFS_SUS_MAP=n
+
     - name: Resolve SUSFS commit
       id: susfs-cm
       shell: bash
@@ -271,7 +287,7 @@ jobs:
         set -euo pipefail
         # KernelSU-Next (next) always uses the latest susfs4ksu gki branch tip so
         # SUSFS stays API-matched to the always-latest KernelSU-Next tree. All
-        # other roots (kernelsu, resukisu, sukisu-ultra) use the pinned
+        # other roots (kernelsu, resukisu, sukisu-ultra, kazesu) use the pinned
         # verified SUSFS commit.
         if [ "${{ inputs.root_flavor }}" = "next" ]; then
           BRANCH="gki-${{ inputs.android_version }}-${{ inputs.kernel_version }}"
