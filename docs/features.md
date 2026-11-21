@@ -13,7 +13,8 @@ Kernel-based su and root access management for Android.
 | KernelSU | Original implementation by [tiann](https://github.com/tiann) — the foundation from which all other variants are derived. | [tiann/KernelSU](https://github.com/tiann/KernelSU) |
 | KernelSU-Next | Created by [rifsxd](https://github.com/rifsxd). SUSFS-integrated builds sourced from pershoot. | [KernelSU-Next/KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next) · [pershoot/KernelSU-Next](https://github.com/pershoot/KernelSU-Next) |
 | ReSukiSU | Fork of SukiSU, also has its own SUSFS-integrated branch. | [ReSukiSU/ReSukiSU](https://github.com/ReSukiSU/ReSukiSU) |
-| KazeSU | KernelSU-based root solution from the SukiSU lineage. Ships an officially signed manager APK; kernel builds track its latest release. | [KazeSU/KazeSU](https://github.com/KazeSU/KazeSU) |
+| KazeSU | KernelSU-based root solution from the SukiSU lineage. Ships an officially signed manager APK; kernel builds track its latest release. KPM (`CONFIG_KPM=y`) is enabled on arm64 builds. | [KazeSU/KazeSU](https://github.com/KazeSU/KazeSU) |
+| KPM | Kernel Patch Module support bundled with KazeSU, built on KernelPatch. Loadable kernel modules managed from the KazeSU manager. | [KazeSU/KazeSU](https://github.com/KazeSU/KazeSU) · [bmax121/KernelPatch](https://github.com/bmax121/KernelPatch) |
 
 ---
 

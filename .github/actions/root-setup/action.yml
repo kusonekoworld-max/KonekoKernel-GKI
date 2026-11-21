@@ -118,6 +118,13 @@ runs:
         config_list: |
           CONFIG_KSU=y
 
+    - name: Enable KPM for KazeSU
+      if: inputs.flavor == 'kazesu'
+      uses: ./.github/actions/set-kernel-config
+      with:
+        config_list: |
+          CONFIG_KPM=y
+
     - name: Soften KernelSU-Next Kbuild config guard for mrproper
       if: inputs.flavor == 'next'
       shell: bash

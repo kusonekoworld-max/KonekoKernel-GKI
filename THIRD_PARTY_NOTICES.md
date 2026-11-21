@@ -12,6 +12,7 @@
 | SukiSU-Ultra | [SukiSU-Ultra/SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra) | GPL-3.0 |
 | KowSU | [KOWX712/KernelSU](https://github.com/KOWX712/KernelSU) | GPL-3.0 |
 | KSU-Next SUSFS | [pershoot/KernelSU-Next](https://github.com/pershoot/KernelSU-Next) | GPL-3.0 |
+| KernelPatch | [bmax121/KernelPatch](https://github.com/bmax121/KernelPatch) | GPL-2.0 |
 | susfs4ksu | [simonpunk/susfs4ksu](https://gitlab.com/simonpunk/susfs4ksu) | GPL-3.0+ |
 | NoMount | [maxsteeel/nomount](https://github.com/maxsteeel/nomount) | GPL-3.0 |
 | kernel_patches | [WildKernels/kernel_patches](https://github.com/WildKernels/kernel_patches) | GPL-2.0 |
