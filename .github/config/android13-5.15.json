@@ -2,6 +2,26 @@
   "version": "android13-5.15",
   "include": [
     {
+      "sublevel": "185",
+      "date": "2025-07"
+    },
+    {
+      "sublevel": "189",
+      "date": "2025-09"
+    },
+    {
+      "sublevel": "194",
+      "date": "2025-12"
+    },
+    {
+      "sublevel": "197",
+      "date": "2026-03"
+    },
+    {
+      "sublevel": "206",
+      "date": "2026-06"
+    },
+    {
       "sublevel": "211",
       "date": "2026-09"
     }
